@@ -1,7 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
-
 ;; Author: vmargb
-;; Version: 0.1
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -27,23 +26,24 @@
 ;;
 ;; ~~ REVIEW WORKFLOW ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ;;
-;; When a session is running, each due file opens normally so you can read and
-;; edit it freely.  A header line shows session context.
-;; When you're done with a file, rate it:
+;;   Phase 1 FRONT CARD
+;;     A buffer shows only the concept name, group, and box.
+;;     Recall and explain the concept from memory before looking at your notes.
 ;;
-;;   C-c l g   Good  – you recalled the concept confidently  (advance one box)
-;;   C-c l b   Bad   – you struggled or got confused         (reset to Box 1)
-;;   C-c l s   Skip  – defer this file, keep its box
-;;   C-c l q   Quit  – end the session (progress is auto-saved)
-;;   C-c l ?   Show this help in the echo area
+;;       [SPC]  Reveal the note file
+;;       [s]    Skip this item
+;;       [q]    Quit the session
 ;;
-;; ~~ BOX SCHEDULE (default, all customisable) ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;;   Phase 2 REVEALED FILE
+;;     Your note file opens normally fully editable.
+;;     This is the Feynman step: read, compare with what you recalled, and
+;;     update your notes where your understanding was shaky.
 ;;
-;;   Box 1 →  review every  1 day   (new / difficult material)
-;;   Box 2 →  review every  3 days
-;;   Box 3 →  review every  7 days
-;;   Box 4 →  review every 14 days
-;;   Box 5 →  review every 30 days  (thoroughly mastered)
+;;       C-c l g   Good  confident recall     (advance one box)
+;;       C-c l b   Bad   struggled or blank   (reset to Box 1)
+;;       C-c l s   Skip
+;;       C-c l q   Quit session
+;;       C-c l ?   Show keybindings
 ;;
 ;; ~~ CUSTOMISATION ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ;;
@@ -51,6 +51,33 @@
 ;;   leitner-box-intervals   vector of per-box intervals in days
 ;;   leitner-default-group   group used when none is specified
 ;;
+;;   DASHBOARD KEYS
+;;
+;;   RET   Open the file list for that group (group detail view)
+;;   r     Start a review session for the group under point
+;;   a     Add a file (defaults to current buffer)
+;;   A     Create a new empty group
+;;   d     Delete the group under point
+;;   s     Start a session across ALL groups
+;;   S     Save the index manually
+;;   g     Refresh
+;;
+;;   GROUP DETAIL KEYS
+;;
+;;   RET   Open the file under point
+;;   r     Reset that file to Box 1
+;;   d     Remove that file from the index
+;;   a     Add a file to this group
+;;   q     Close
+;;
+;;   SETUP (use-package example)
+;;
+;;   (use-package leitner-notes
+;;     :load-path "~/src/leitner-notes"
+;;     :custom
+;;     (leitner-index-file "~/notes/.leitner-index.json")
+;;     (leitner-box-intervals [1 3 7 14 30])
+;;     :bind ("C-c r l" . leitner))
 
 ;;; Code:
 
@@ -76,7 +103,7 @@ Your note files are never touched, so all state lives here."
   :type 'file
   :group 'leitner)
 
-(defcustom leitner-box-intervals [1 3 7 14 30]
+(defcustom leitner-box-intervals [1 3 7 14 30 60 90]
   "Review intervals (days) for each Leitner box.
 Index 0 = Box 1 (reviewed most frequently)."
   :type '(vector integer)
@@ -92,23 +119,21 @@ Index 0 = Box 1 (reviewed most frequently)."
 ;;  Internal State
 ;; ===========================================================================
 
-;; leitner--data is the root in-memory store.
-;; It is an alist with these keys:
-;;   :groups  – hash-table  group-name (string) -> group-alist
-;;   :dirty   – bool        t when there are unsaved changes
+;; leitner--data  =  ((:groups . HASH-TABLE)  (:dirty . BOOL))
 ;;
-;; A group-alist has:
-;;   :name    – string
-;;   :items   – list of item-alists
+;; HASH-TABLE  :  group-name (string)  ->  group-alist
+;; group-alist :  ((:name . STRING)  (:items . LIST-OF-ITEM-ALISTS))
+;; item-alist  :  ((:path . STRING)  (:box . INT)
+;;                 (:last-reviewed . INT)  (:added . INT)
+;;                 (:graduated . INT-OR-NIL))   ; Unix ts when graduated, nil if active
 ;;
-;; An item-alist has:
-;;   :path           – string  (absolute path)
-;;   :box            – integer (1-indexed)
-;;   :last-reviewed  – integer (Unix timestamp; 0 = never reviewed)
-;;   :added          – integer (Unix timestamp)
+;; All mutations go through setcdr+assq to modify the shared cons cells
+;; in-place.  Never use alist-get as a setf target with a gethash argument
+;; -- that pattern causes "Symbol's value as variable is void: %s" errors
+;; because of how the setf macro expands in some Emacs versions.
 
 (defvar leitner--data nil
-  "In-memory representation of the Leitner index.  Is nil until first load.")
+  "In-memory Leitner index.  Nil until first initialisation.")
 
 ;; leitner--session holds the state of an active review session:
 ;;
@@ -120,6 +145,31 @@ Index 0 = Box 1 (reviewed most frequently)."
 (defvar leitner--session nil
   "Active review session state, or nil when idle.")
 
+
+;; ===========================================================================
+;;  Small Utilities
+;; ===========================================================================
+
+(defun leitner--now ()
+  "Return the current time as a Unix timestamp (integer)."
+  (floor (float-time)))
+
+(defun leitner--num-boxes ()
+  "Return the number of Leitner boxes."
+  (length leitner-box-intervals))
+
+(defun leitner--box-days (box)
+  "Review interval in days for BOX (1-indexed)."
+  (aref leitner-box-intervals (1- box)))
+
+(defun leitner--box-secs (box)
+  "Review interval in seconds for BOX (1-indexed)."
+  (* (leitner--box-days box) 86400))
+
+
+;; =========================================================================
+;;  Provide
+;; =========================================================================
 
 (provide 'leitner)
 ;;; leitner.el ends here
