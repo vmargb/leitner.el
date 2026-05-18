@@ -3,12 +3,12 @@
 #+DESCRIPTION: Leitner box system for reviewing whole note files.
 #+LICENSE: GPL-3.0-or-later
 
-* What is Leitner?
+** What is Leitner?
  =leitner.el= is an Emacs package that applies the =Leitner box system= to your org-mode notes. It is designed for people who take extensive notes but rarely revisit them(or have too many to review). I often combine this with the =feynman technique= to re-explain my org-notes from memory before revealing them.
 
  *Leitner* does /not/ replace flashcard apps or other =SRS= packages, instead it complements your existing note-taking workflow by making spaced review a natural part of it.
 
-** How It Works
+*** How It Works
  Each file starts in Box 1. After reviewing a file, you rate your recall confidence:
  - /Good/: The file moves up one box (e.g., Box 1 -> Box 2).
  - /Bad/: The file resets to Box 1.
@@ -17,11 +17,11 @@
  Each box has a defined review interval (e.g., Box 1 = 1 day, Box 2 = 3 days). Files are only shown for review when their interval has elapsed since the last review. Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the active review queue.
 
 
-* What this is not
+** What this is not
  This is *not* a flashcard app. Insead you review entire org files, rather than a question & answer box(but you can do this too). Additionally, your note files are /never modified/, all scheduling metadata is stored in an external JSON file. So the format itself doesn't matter, this works with org, markdown, plain text, or anything else.
 
 
-* Installation with =package-vc-install= (emacs 29+)
+** Installation with =package-vc-install= (emacs 29+)
  Add the following to your Emacs configuration (e.g., ~init.el~), you can assign your own intervals and file-path, otherwise it will use the user emacs directory:
 
  #+BEGIN_SRC emacs-lisp
@@ -33,7 +33,7 @@
      :bind ("C-c r l" . leitner))
  #+END_SRC
 
-** Customization
+*** Customization
  Leitner provides come custom variables to tailor the experience to
  your needs:
  - =leitner-index-file=: Path to the JSON file storing all review metadata.
@@ -52,7 +52,7 @@
  (setq leitner-default-group "Work")
  #+END_SRC
 
-* Quick Start
+** Quick Start
  | Keybinding                | Command               | Description                               |
  |---------------------------+-----------------------+-------------------------------------------|
  | =M-x leitner=               | =leitner=               | Open the group dashboard.                 |
@@ -60,7 +60,7 @@
  | =M-x leitner-add-file=      | =leitner-add-file=      | Add the current buffer's file to a group. |
  | =M-x leitner-start-session= | =leitner-start-session= | Start a review session for due files.     |
 
-* Review Workflow
+** Review Workflow
  Leitner's review process is divided into two phases:
 
  *+ Phase 1: Front Card (Recall)*
@@ -86,7 +86,7 @@
    | =C-c l q=    | =leitner-quit-session= | Quit the session               |
    | =C-c l ?=    | =leitner-review-help= | Show keybindings              |
 
-* Dashboard and Group Detail
+** Dashboard and Group Detail
  The dashboard (=M-x leitner=) provides an overview of all your groups and
  their review status. Use the following keys to navigate and manage your
  groups:
@@ -113,7 +113,7 @@
 
 
 
-* Why Leitner and not SM-2, FSRS?
+** Why Leitner and not SM-2, FSRS?
 On top of Leitner being much simpler to implement. Leitner's structure is transparent and you control it directly, whereas the others require trusting an algorithm's decision about when something should resurface, which is perfect for cards that are incredibly high in quantity(like vocabulary lists or definitions).
 
 However, in my experience these algorithms seem to matter /less/ for reviewing *longer form* notes that you've taken in markdown or org. In this case you may want to see related material grouped together in fixed boxes with a more predictable spacing effect, that simplicity and control might actually be preferable(at least it is for me).
