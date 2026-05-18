@@ -155,6 +155,58 @@ Index 0 = Box 1 (reviewed most frequently)."
   "Review interval in seconds for BOX (1-indexed)."
   (* (leitner--box-days box) 86400))
 
+(defun leitner--item-due-p (item)
+  "Return non-nil when ITEM is due for review.
+Graduated items are never due, they have left the active queue."
+  (and (not (cdr (assq :graduated item)))
+       (let ((lr  (cdr (assq :last-reviewed item)))
+             (box (cdr (assq :box item))))
+         (or (= lr 0)
+             (>= (- (leitner--now) lr) (leitner--box-secs box))))))
+
+(defun leitner--item-days-until-due (item)
+  "Days until ITEM is next due; negative = overdue; 0 = never reviewed."
+  (let ((lr (cdr (assq :last-reviewed item))))
+    (if (= lr 0) 0
+      (/ (- (leitner--box-secs (cdr (assq :box item)))
+            (- (leitner--now) lr))
+         86400.0))))
+
+(defun leitner--make-item (path)
+  "Return a fresh item-alist for PATH placed in Box 1."
+  (list (cons :path          (expand-file-name path))
+        (cons :box           1)
+        (cons :last-reviewed 0)
+        (cons :added         (leitner--now))
+        (cons :graduated     nil)))
+
+(defun leitner--item-graduated-p (item)
+  "Return non-nil when ITEM has been graduated (fully mastered)."
+  (cdr (assq :graduated item)))
+
+(defun leitner--item-rate (item outcome)
+  "Return a NEW item-alist for ITEM rated with OUTCOME (good / bad / skip)."
+  (let* ((old-box (cdr (assq :box item)))
+         (last-box (leitner--num-boxes))
+         ;; graduating: good rating on the final box.
+         (graduating (and (eq outcome 'good) (= old-box last-box)))
+         (new-box (pcase outcome
+                    ('good (if graduating last-box (1+ old-box)))
+                    ('bad  1)
+                    ('skip old-box))))
+    (list (cons :path          (cdr (assq :path item)))
+          (cons :box           new-box)
+          (cons :last-reviewed (if (eq outcome 'skip)
+                                   (cdr (assq :last-reviewed item))
+                                 (leitner--now)))
+          (cons :added         (cdr (assq :added item)))
+          (cons :graduated     (if graduating (leitner--now) nil)))))
+
+(defun leitner--format-ts (ts)
+  "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0."
+  (if (= ts 0) "Never"
+    (format-time-string "%Y-%m-%d" (seconds-to-time ts))))
+
 ;; ===========================================================================
 ;;  Data Access
 ;; ===========================================================================
