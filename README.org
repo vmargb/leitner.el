@@ -53,18 +53,17 @@
  #+END_SRC
 
 * Quick Start
- | Keybinding                | Command               | Description                                  |
- |---------------------------+-----------------------+----------------------------------------------|
- | =M-x leitner=               | =leitner=               | Open the group dashboard.                    |
- | =M-x leitner-add-group=     | =leitner-add-group=     | Add a new group.                             |
- | =M-x leitner-add-file=      | =leitner-add-file=      | Add the current buffer's file to a group.    |
- | =M-x leitner-start-session= | =leitner-start-session= | Start a review session for due files.        |
- | =M-x leitner-status=        | =leitner-status=        | Show a summary of all files and their boxes. |
+ | Keybinding                | Command               | Description                               |
+ |---------------------------+-----------------------+-------------------------------------------|
+ | =M-x leitner=               | =leitner=               | Open the group dashboard.                 |
+ | =M-x leitner-add-group=     | =leitner-add-group=     | Add a new group.                          |
+ | =M-x leitner-add-file=      | =leitner-add-file=      | Add the current buffer's file to a group. |
+ | =M-x leitner-start-session= | =leitner-start-session= | Start a review session for due files.     |
 
 * Review Workflow
  Leitner's review process is divided into two phases:
 
- **+ Phase 1: Front Card (Recall)**
+ *+ Phase 1: Front Card (Recall)*
    When you start a review session, Leitner shows you a "front card" for each due file. This card displays only the /filename/, /group/, and /box/.
    The goal is to recall and explain the concept from memory before looking at your notes. You can optionally add a question prompt if you want to treat this as a flashcard.
 
@@ -74,10 +73,10 @@
    | =s=   | Skip this item       |
    | =q=   | Quit the session     |
 
- **+ Phase 2: Revealed File (Feynman Step)**
+ *+ Phase 2: Revealed File (Feynman Step)*
    Once you reveal the file, it opens in a fully editable buffer. This is
    where the /Feynman Technique/ comes into play: read your notes, compare
-   them with what you recalled, and update them where your understanding was shaky. Similar to phase 1, this can also just be a standard q->a.
+   them with what you recalled, and update them where your understanding was shaky. Similar to phase 1, this can also just be a standard q->a too.
 
    | Keybinding   | Command             | Action                              |
    |--------------|---------------------|-------------------------------------|

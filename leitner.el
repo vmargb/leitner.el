@@ -8,8 +8,8 @@
 ;;; Commentary:
 ;;
 ;; leitner.el implements the Leitner box system for WHOLE NOTE FILES
-;; rather than individual flashcards.  It is designed around the "iterative
-;; note revision" workflow: you write explanations of concepts in org (or any)
+;; rather than individual flashcards.  It is designed to complement your
+;; existing note-taking workflow you write notes of concepts in org (or any)
 ;; files, and this package surfaces them for review according to a Leitner schedule.
 ;;
 ;; FILES ARE NEVER MODIFIED.  All scheduling metadata lives in an external
@@ -22,13 +22,12 @@
 ;;   M-x leitner-add-group     Add new group to add files to
 ;;   M-x leitner-add-file      Add current buffer's file to a group
 ;;   M-x leitner-start-session Review all due files (or C-u for one group)
-;;   M-x leitner-status        Summary of all files and their boxes
 ;;
 ;; ~~ REVIEW WORKFLOW ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ;;
 ;;   Phase 1 FRONT CARD
-;;     A buffer shows only the concept name, group, and box.
-;;     Recall and explain the concept from memory before looking at your notes.
+;;     A buffer shows only the buffer name, group, and box.
+;;     Recall and explain the contents from memory before looking
 ;;
 ;;       [SPC]  Reveal the note file
 ;;       [s]    Skip this item
@@ -37,7 +36,7 @@
 ;;   Phase 2 REVEALED FILE
 ;;     Your note file opens normally fully editable.
 ;;     This is the Feynman step: read, compare with what you recalled, and
-;;     update your notes where your understanding was shaky.
+;;     update your notes where your understanding was shaky before moving on
 ;;
 ;;       C-c l g   Good  confident recall     (advance one box)
 ;;       C-c l b   Bad   struggled or blank   (reset to Box 1)
@@ -70,15 +69,6 @@
 ;;   a     Add a file to this group
 ;;   q     Close
 ;;
-;;   SETUP (use-package example)
-;;
-;;   (use-package leitner-notes
-;;     :load-path "~/src/leitner-notes"
-;;     :custom
-;;     (leitner-index-file "~/notes/.leitner-index.json")
-;;     (leitner-box-intervals [1 3 7 14 30])
-;;     :bind ("C-c r l" . leitner))
-
 ;;; Code:
 
 (require 'cl-lib)
@@ -136,7 +126,6 @@ Index 0 = Box 1 (reviewed most frequently)."
   "In-memory Leitner index.  Nil until first initialisation.")
 
 ;; leitner--session holds the state of an active review session:
-;;
 ;;   :queue        – list of (group-name . item-alist) pairs still to review
 ;;   :reviewed     – integer count of items rated so far
 ;;   :total        – integer total items in this session
@@ -166,10 +155,43 @@ Index 0 = Box 1 (reviewed most frequently)."
   "Review interval in seconds for BOX (1-indexed)."
   (* (leitner--box-days box) 86400))
 
+;; ===========================================================================
+;;  Data Access
+;; ===========================================================================
 
-;; =========================================================================
-;;  Provide
-;; =========================================================================
+(defun leitner--ensure-data ()
+  "Initialise `leitner--data', loading from disk when available."
+  (unless leitner--data
+    (if (file-exists-p (expand-file-name leitner-index-file))
+        (leitner-load)
+      (setq leitner--data
+            (list (cons :groups (make-hash-table :test #'equal))
+                  (cons :dirty  nil))))))
+
+(defun leitner--groups-ht ()
+  "Return the groups hash-table."
+  (cdr (assq :groups leitner--data)))
+
+(defun leitner--group-names ()
+  "Return a sorted list of all group names."
+  (sort (hash-table-keys (leitner--groups-ht)) #'string<))
+
+(defun leitner--get-group (name)
+  "Return the group alist for NAME, or nil."
+  (gethash name (leitner--groups-ht)))
+
+(defun leitner--get-or-create-group (name)
+  "Return the group alist for NAME, creating it if it does not exist."
+  (or (leitner--get-group name)
+      (let ((g (list (cons :name name) (cons :items nil))))
+        (puthash name g (leitner--groups-ht))
+        g)))
+
+(defun leitner--group-items (name)
+  "Return the items list for group NAME (might be nil)."
+  (let ((g (leitner--get-group name)))
+    (when g (cdr (assq :items g)))))
+
 
 (provide 'leitner)
 ;;; leitner.el ends here
