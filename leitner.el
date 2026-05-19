@@ -244,6 +244,172 @@ Graduated items are never due, they have left the active queue."
   (let ((g (leitner--get-group name)))
     (when g (cdr (assq :items g)))))
 
+;; Direct in-place mutation using setcdr+assq.
+;; Because gethash returns the actual cons-cell list stored in the hash
+;; table, setcdr on one of its cells modifies the hash-table value too.
+
+(defun leitner--set-group-items (group-name items)
+  "Replace the items list of GROUP-NAME with ITEMS (mutates in-place)."
+  (let ((g (gethash group-name (leitner--groups-ht))))
+    (when g
+      (setcdr (assq :items g) items))))
+
+(defun leitner--prepend-item (group-name item)
+  "Add ITEM to the front of GROUP-NAME's items list."
+  (leitner--get-or-create-group group-name)
+  (leitner--set-group-items
+   group-name
+   (cons item (leitner--group-items group-name))))
+
+(defun leitner--replace-item (group-name path new-item)
+  "Replace the item with :path = PATH in GROUP-NAME with NEW-ITEM."
+  (leitner--set-group-items
+   group-name
+   (mapcar (lambda (it)
+             (if (equal (cdr (assq :path it)) path) new-item it))
+           (leitner--group-items group-name))))
+
+(defun leitner--mark-dirty ()
+  "Mark the index if it has an unsaved change."
+  (leitner--ensure-data)
+  (setcdr (assq :dirty leitner--data) t))
+
+(defun leitner--all-pairs ()
+  "All (group-name . item-alist) pairs across every group."
+  (let (result)
+    (maphash (lambda (gname g)
+               (dolist (item (cdr (assq :items g)))
+                 (push (cons gname item) result)))
+             (leitner--groups-ht))
+    result))
+
+(defun leitner--due-pairs (&optional group-name)
+  "Due (group-name . item-alist) pairs, optionally filtered to GROUP-NAME."
+  (seq-filter
+   (lambda (pair)
+     (and (or (null group-name) (equal (car pair) group-name))
+          (leitner--item-due-p (cdr pair))))
+   (leitner--all-pairs)))
+
+(defun leitner--path-registered-p (path &optional group-name)
+  "Return non-nil if PATH is already registered (optionally in GROUP-NAME)."
+  (let ((abs (expand-file-name path)))
+    (seq-find
+     (lambda (pair)
+       (and (or (null group-name) (equal (car pair) group-name))
+            (equal (cdr (assq :path (cdr pair))) abs)))
+     (leitner--all-pairs))))
+
+
+;; =========================================================================
+;;  Persistence
+;; =========================================================================
+
+;; use json-key-type 'string when reading so that JSON object keys
+;; come back as plain strings, no interning, no symbol quirks
+;; on the write side, json-encode calls symbol-name on symbol keys, so
+;; symbol-keyed alists serialise cleanly
+
+(defun leitner--data->json-sexp ()
+  "Convert `leitner--data' to a JSON-encodable sexp."
+  (let (groups-list)
+    (maphash
+     (lambda (gname g)
+       (let* ((items (cdr (assq :items g)))
+              (encoded-items
+               (vconcat
+                (mapcar
+                 (lambda (item)
+                   ;; Symbol keys -> json-encode uses symbol-name -> strings.
+                   (list (cons 'path          (cdr (assq :path item)))
+                         (cons 'box           (cdr (assq :box  item)))
+                         (cons 'last_reviewed (cdr (assq :last-reviewed item)))
+                         (cons 'added         (cdr (assq :added item)))
+                         (cons 'graduated     (or (cdr (assq :graduated item))
+                                                  :json-false))))
+                 items))))
+         ;; gname is a string; json-encode-key handles strings directly.
+         (push (cons gname (list (cons 'name  gname)
+                                 (cons 'items encoded-items)))
+               groups-list)))
+     (leitner--groups-ht))
+    (list (cons 'version       1)
+          (cons 'box_intervals leitner-box-intervals)
+          (cons 'groups        groups-list))))
+
+(defun leitner--json-sexp->data (sexp)
+  "Parse SEXP (from `json-read' with string keys) into internal data."
+  (let ((ht (make-hash-table :test #'equal)))
+    (dolist (group-pair (cdr (assoc "groups" sexp)))
+      (let* ((gname      (car group-pair))
+             (gdata      (cdr group-pair))
+             (raw-items  (cdr (assoc "items" gdata)))
+             (items-list (if (vectorp raw-items) (append raw-items nil) nil))
+             (items
+              (mapcar
+               (lambda (raw)
+                 (let ((grad (cdr (assoc "graduated" raw))))
+                   (list (cons :path          (cdr (assoc "path"          raw)))
+                         (cons :box           (cdr (assoc "box"           raw)))
+                         (cons :last-reviewed (cdr (assoc "last_reviewed" raw)))
+                         (cons :added         (cdr (assoc "added"         raw)))
+                         ;; JSON false/null both come back as nil in Emacs;
+                         ;; a real timestamp is an integer -- keep it as-is.
+                         (cons :graduated     (if (or (null grad)
+                                                      (eq grad :json-false))
+                                                  nil grad)))))
+               items-list)))
+        (puthash gname
+                 (list (cons :name gname) (cons :items items))
+                 ht)))
+    (list (cons :groups ht) (cons :dirty nil))))
+
+;;;###autoload
+(defun leitner-save ()
+  "Save the Leitner index to `leitner-index-file'."
+  (interactive)
+  (leitner--ensure-data)
+  (let* ((full  (expand-file-name leitner-index-file))
+         (dir   (file-name-directory full)))
+    (when dir (make-directory dir t))
+    (let ((json-encoding-pretty-print t))
+      (with-temp-file full
+        (insert (json-encode (leitner--data->json-sexp)))))
+    (setcdr (assq :dirty leitner--data) nil)
+    (message "Leitner: saved to %s" (abbreviate-file-name full))))
+
+;;;###autoload
+(defun leitner-load ()
+  "Load the Leitner index from `leitner-index-file'."
+  (interactive)
+  (let ((full (expand-file-name leitner-index-file)))
+    (if (not (file-exists-p full))
+        (progn
+          (setq leitner--data
+                (list (cons :groups (make-hash-table :test #'equal))
+                      (cons :dirty  nil)))
+          (message "Leitner: no index found -- starting fresh."))
+      (condition-case err
+          (let ((json-object-type 'alist)
+                (json-array-type  'vector)
+                (json-key-type    'string))
+            (setq leitner--data
+                  (leitner--json-sexp->data (json-read-file full)))
+            (message "Leitner: loaded %d group(s)."
+                     (hash-table-count (leitner--groups-ht))))
+        (error
+         (message "Leitner: failed to load -- %s" (error-message-string err))
+         (setq leitner--data
+               (list (cons :groups (make-hash-table :test #'equal))
+                     (cons :dirty  nil))))))))
+
+(add-hook 'kill-emacs-hook
+          (lambda ()
+            (when (and leitner--data
+                       (cdr (assq :dirty leitner--data)))
+              (leitner-save))))
+
+
 
 (provide 'leitner)
 ;;; leitner.el ends here
