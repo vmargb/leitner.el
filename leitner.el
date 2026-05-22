@@ -38,7 +38,7 @@
 ;;     update your notes where your understanding was shaky before moving on
 ;;
 ;;       C-c l g   Good  confident recall     (advance one box)
-;;       C-c l b   Bad   struggled or blank   (reset to Box 1)
+;;       C-c l b   Bad   struggled or blank   (prompts: move back one, or reset to box 1)
 ;;       C-c l s   Skip
 ;;       C-c l q   Quit session
 ;;       C-c l ?   Show keybindings
@@ -184,14 +184,15 @@ Graduated items are never due -- they have left the active queue."
   (cdr (assq :graduated item)))
 
 (defun leitner--item-rate (item outcome)
-  "Return a NEW item-alist for ITEM rated with OUTCOME (good / bad / skip)."
+  "Return a NEW item-alist for ITEM rated with OUTCOME (good / bad / reset / skip)."
   (let* ((old-box (cdr (assq :box item)))
          (last-box (leitner--num-boxes))
-         ;; graduating: good rating on the final box.
+         ;; graduating: good rating on the final box
          (graduating (and (eq outcome 'good) (= old-box last-box)))
          (new-box (pcase outcome
                     ('good (if graduating last-box (1+ old-box)))
-                    ('bad  1)
+                    ('reset  1)
+                    ('hard (max 1 (1- old-box)))
                     ('skip old-box))))
     (list (cons :path          (cdr (assq :path item)))
           (cons :box           new-box)
@@ -532,7 +533,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
           (leitner--show-front-card pair))))))
 
 (defun leitner--session-record (outcome)
-  "Record the OUTCOME (good/bad/skip) for the current item and advance."
+  "Record the OUTCOME (good/bad:{hard,reset}/skip) for the current item and advance."
   (unless leitner--session
     (user-error "Leitner: no active session"))
   (let* ((queue    (cdr (assq :queue leitner--session)))
@@ -552,7 +553,10 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
                                (propertize "Graduated! Removed from active queue."
                                            'face 'success)
                              (format "Good -> Box %d" (cdr (assq :box new-item)))))
-                     ('bad  "Reset -> Box 1")
+                     ('reset  "Reset -> Box 1")
+                     ('hard (if (= (cdr (assq :box new-item)) 1)
+                                    (propertize "Already in Box 1" 'face 'warning)
+                                  (format "Down -> Box %d" (cdr (assq :box new-item)))))
                      ('skip "Skipped"))))
       (message "Leitner: %s  (%d / %d done)"
                label
@@ -719,7 +723,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
 
 
 ;; [leitner-rate-good]   Good  (advance one box)
-;; [leitner-rate-bad]    Bad   (reset to box 1)
+;; [leitner-rate-bad]    Bad   (prompts: back one box or reset to box 1)
 ;; [leitner-rate-skip]   Skip
 ;; [leitner-quit-session]   Quit session
 ;; [leitner-review-help]    Show keybindings"
@@ -763,10 +767,17 @@ and rate your recall when done"
   (leitner--session-record 'good))
 
 ;;;###autoload
+;;;###autoload
 (defun leitner-rate-bad ()
-  "Rate current review item BAD (reset to Box 1)."
+  "Prompt whether to move the item back one box or reset to Box 1."
   (interactive)
-  (leitner--session-record 'bad))
+  (let ((choice (read-char-choice
+                 "Bad rating: [b]ack one box(hard), [r]eset to Box 1(complete blank), [q]uit? "
+                 '(?b ?r ?q))))
+    (pcase choice
+      (?b (leitner--session-record 'back))
+      (?r (leitner--session-record 'reset))
+      (?q (message "Leitner: rating cancelled.")))))
 
 ;;;###autoload
 (defun leitner-rate-skip ()
@@ -788,8 +799,7 @@ and rate your recall when done"
 (defun leitner-review-help ()
   "Echo review keybindings in minibuffer."
   (interactive)
-  (message "Leitner: C-c l g Good   C-c l b Bad   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
-
+  (message "Leitner: C-c l g Good   C-c l b Bad (prompts)   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
 
 ;; =========================================================================
 ;;  Dashboard: the main entry point showing each group
