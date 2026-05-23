@@ -207,6 +207,13 @@ Graduated items are never due -- they have left the active queue."
   (if (= ts 0) "Never"
     (format-time-string "%Y-%m-%d" (seconds-to-time ts))))
 
+(defun leitner--shuffle (seq)
+  "Return a shuffled copy of SEQ using fisher-yates."
+  (let ((v (vconcat seq)))
+    (dotimes (i (length v))
+      (let ((j (+ i (random (- (length v) i)))))
+        (cl-rotatef (aref v i) (aref v j))))
+    (append v nil)))
 
 ;; ===========================================================================
 ;;  Data Access
@@ -482,6 +489,9 @@ prompts for a group and defaults to the current buffers file."
 ;;  Review Session
 ;; ===========================================================================
 
+;; REVIEW ORDER: The due list is first shuffled randomly by `leitner--shuffle',
+;; then stable sorted by box number. This groups items by box number while
+;; randomising the order within each box
 ;;;###autoload
 (defun leitner-start-session (&optional group-name)
   "Start a Leitner review session for all currently due files.
@@ -499,13 +509,13 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
         (message "Leitner: nothing due%s, great work!"
                  (if group-name (format " in '%s'" group-name) ""))
       (let ((queue
-             (sort (copy-sequence due)
+             ;; sort by box number after shuffling
+             ;; randomising the order within each box
+             (sort (leitner--shuffle due)
                    (lambda (a b)
                      (let ((ba (cdr (assq :box (cdr a))))
                            (bb (cdr (assq :box (cdr b)))))
-                       (if (/= ba bb) (< ba bb)
-                         (< (cdr (assq :last-reviewed (cdr a)))
-                            (cdr (assq :last-reviewed (cdr b))))))))))
+                       (< ba bb))))))
         (setq leitner--session
               (list (cons :queue        queue)
                     (cons :reviewed     0)
@@ -767,15 +777,22 @@ and rate your recall when done"
   (leitner--session-record 'good))
 
 ;;;###autoload
-;;;###autoload
 (defun leitner-rate-bad ()
   "Prompt whether to move the item back one box or reset to Box 1."
   (interactive)
-  (let ((choice (read-char-choice
-                 "Bad rating: [b]ack one box(hard), [r]eset to Box 1(complete blank), [q]uit? "
-                 '(?b ?r ?q))))
+  (let* ((accent-face 'font-lock-keyword-face)
+         (prompt
+          (concat
+           "Bad rating: ["
+           (propertize "b" 'face accent-face)
+           "]ack one box(hard), ["
+           (propertize "r" 'face accent-face)
+           "]eset to Box 1(complete blank), ["
+           (propertize "q" 'face accent-face)
+           "]uit? "))
+         (choice (read-char-choice prompt '(?b ?r ?q))))
     (pcase choice
-      (?b (leitner--session-record 'back))
+      (?b (leitner--session-record 'hard))
       (?r (leitner--session-record 'reset))
       (?q (message "Leitner: rating cancelled.")))))
 
