@@ -171,13 +171,17 @@ Graduated items are never due -- they have left the active queue."
             (- (leitner--now) lr))
          86400.0))))
 
-(defun leitner--make-item (path)
-  "Return a fresh item-alist for PATH placed in Box 1."
+(defun leitner--make-item (path &optional question)
+  "Return a fresh item-alist for PATH placed in Box 1.
+Attach question to the item if QUESTION is provided and not empty."
   (list (cons :path          (expand-file-name path))
         (cons :box           1)
         (cons :last-reviewed 0)
         (cons :added         (leitner--now))
-        (cons :graduated     nil)))
+        (cons :graduated     nil)
+        (cons :question      (if (and question (not (string-empty-p question)))
+                                 question
+                               nil))))
 
 (defun leitner--item-graduated-p (item)
   "Return non-nil when ITEM has been graduated (fully mastered)."
@@ -439,22 +443,30 @@ Graduated items are never due -- they have left the active queue."
 ;;;###autoload
 (defun leitner-add-file (&optional file group)
   "Add FILE to GROUP for spaced repetition.
-prompts for a group and defaults to the current buffers file."
+Prompts for a group and defaults to the current buffer's file."
   (interactive)
   (leitner--ensure-data)
   (let* ((target (expand-file-name
                   (or file
                       (buffer-file-name)
                       (read-file-name "File to add: " nil nil t))))
-         (grp    (or group (leitner--read-group-name))))
+         (grp (or group (leitner--read-group-name)))
+         (question ; optional question prompt when adding a card
+          (when (called-interactively-p 'any)
+            (when (y-or-n-p (format "Set a question prompt for '%s'? "
+                                    (file-name-nondirectory target)))
+              (read-string "Question prompt (leave blank to skip): ")))))
     (if (leitner--path-registered-p target grp)
         (message "Leitner: '%s' is already in group '%s'."
                  (file-name-nondirectory target) grp)
-      (leitner--prepend-item grp (leitner--make-item target))
+      (leitner--prepend-item grp (leitner--make-item target question))
       (leitner--mark-dirty)
       (leitner-save)
-      (message "Leitner: added '%s' to group '%s' (Box 1)."
-               (file-name-nondirectory target) grp)
+      (message "Leitner: added '%s' to group '%s' (Box 1)%s."
+               (file-name-nondirectory target) grp
+               (if (and question (not (string-empty-p question)))
+                   " with question prompt"
+                 ""))
       (leitner--maybe-refresh-dashboard))))
 
 ;;;###autoload

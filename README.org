@@ -62,33 +62,8 @@ This is *not* a traditional flashcard system aimed at atomic facts (definitions,
  | =M-x leitner=               | =leitner=               | Open the group dashboard.                 |
  | =M-x leitner-add-group=     | =leitner-add-group=     | Add a new group.                          |
  | =M-x leitner-add-file=      | =leitner-add-file=      | Add the current buffer's file to a group. |
+ | =M-x leitner-set-question=  | =leitner-set-question=  | Set an optional question prompt           |
  | =M-x leitner-start-session= | =leitner-start-session= | Start a review session for due files.     |
-
-** Review Workflow
- Leitner's review process is divided into two phases:
-
- *+ Phase 1: Front Card (Recall)*
-   When you start a review session, Leitner shows you a "front card" for each due file. This card displays only the /filename/, /group/, and /box/.
-   The goal is to recall and explain the concept from memory before looking at your notes. You can optionally add a question prompt if you want to treat this as a flashcard.
-
-   | Key   | Action               |
-   |-------|----------------------|
-   | =SPC= | Reveal the note file |
-   | =s=   | Skip this item       |
-   | =q=   | Quit the session     |
-
- *+ Phase 2: Revealed File (Feynman Step)*
-   Once you reveal the file, it opens in a fully editable buffer. This is
-   where the /Feynman Technique/ comes into play: read your notes, compare
-   them with what you recalled, and update them where your understanding was shaky. Similar to phase 1, this can also just be a standard q->a too.
-
-   | Keybinding   | Command             | Action                              |
-   |--------------|---------------------|-------------------------------------|
-   | =C-c l g=    | =leitner-rate-good= | Good recall (advance one box)       |
-   | =C-c l b=    | =leitner-rate-bad=  | Struggled or blank (reset to Box 1)|
-   | =C-c l s=    | =leitner-rate-skip= | Skip this item                      |
-   | =C-c l q=    | =leitner-quit-session= | Quit the session               |
-   | =C-c l ?=    | =leitner-review-help= | Show keybindings              |
 
 ** Dashboard and Group Detail
  The dashboard (=M-x leitner=) provides an overview of all your groups and
