@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.2.0
+;; Version: 0.2.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -200,7 +200,8 @@ Graduated items are never due -- they have left the active queue."
                                    (cdr (assq :last-reviewed item))
                                  (leitner--now)))
           (cons :added         (cdr (assq :added item)))
-          (cons :graduated     (if graduating (leitner--now) nil)))))
+          (cons :graduated     (if graduating (leitner--now) nil))
+          (cons :question      (cdr (assq :question item))))))
 
 (defun leitner--format-ts (ts)
   "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0."
@@ -334,12 +335,14 @@ Graduated items are never due -- they have left the active queue."
                          (cons 'last_reviewed (cdr (assq :last-reviewed item)))
                          (cons 'added         (cdr (assq :added item)))
                          (cons 'graduated     (or (cdr (assq :graduated item))
+                                                  :json-false))
+                         (cons 'question      (or (cdr (assq :question item))
                                                   :json-false))))
                  items))))
-         ;; gname is a string; json-encode-key handles strings directly.
-         (push (cons gname (list (cons 'name  gname)
-                                 (cons 'items encoded-items)))
-               groups-list)))
+             ;; gname is a string; json-encode-key handles strings directly.
+             (push (cons gname (list (cons 'name  gname)
+                                     (cons 'items encoded-items)))
+                   groups-list)))
      (leitner--groups-ht))
     (list (cons 'version       1)
           (cons 'box_intervals leitner-box-intervals)
@@ -356,7 +359,8 @@ Graduated items are never due -- they have left the active queue."
              (items
               (mapcar
                (lambda (raw)
-                 (let ((grad (cdr (assoc "graduated" raw))))
+                 (let ((grad (cdr (assoc "graduated" raw)))
+                       (quest (cdr (assoc "question" raw))))
                    (list (cons :path          (cdr (assoc "path"          raw)))
                          (cons :box           (cdr (assoc "box"           raw)))
                          (cons :last-reviewed (cdr (assoc "last_reviewed" raw)))
@@ -365,7 +369,10 @@ Graduated items are never due -- they have left the active queue."
                          ;; a real timestamp is an integer, keep it as-is
                          (cons :graduated     (if (or (null grad)
                                                       (eq grad :json-false))
-                                                  nil grad)))))
+                                                  nil grad))
+                         (cons :question      (if (or (null quest)
+                                                      (eq quest :json-false))
+                                                  nil quest)))))
                items-list)))
         (puthash gname
                  (list (cons :name gname) (cons :items items))
@@ -484,6 +491,30 @@ prompts for a group and defaults to the current buffers file."
     (message "Leitner: group '%s' created." name)
     (leitner--maybe-refresh-dashboard)))
 
+;;;###autoload
+(defun leitner-set-question (question)
+  "Set or update the optional flashcard QUESTION for the current file."
+  (interactive "sQuestion prompt (leave blank to remove): ")
+  (leitner--ensure-data)
+  (let ((path (buffer-file-name)))
+    (unless path
+      (user-error "Leitner: Current buffer is not visiting a file"))
+    (setq path (expand-file-name path))
+    (let ((pair (leitner--path-registered-p path)))
+      (if (not pair)
+          (user-error "Leitner: Current file is not registered in any group")
+        (let* ((gname (car pair))
+               (old-item (cdr pair))
+               (new-item (list (cons :path          (cdr (assq :path old-item)))
+                               (cons :box           (cdr (assq :box old-item)))
+                               (cons :last-reviewed (cdr (assq :last-reviewed old-item)))
+                               (cons :added         (cdr (assq :added old-item)))
+                               (cons :graduated     (cdr (assq :graduated old-item)))
+                               (cons :question      (if (string-empty-p question) nil question)))))
+          (leitner--replace-item gname path new-item)
+          (leitner--mark-dirty)
+          (leitner-save)
+          (message "Leitner: Question updated for '%s'." (file-name-nondirectory path)))))))
 
 ;; ===========================================================================
 ;;  Review Session
@@ -654,6 +685,11 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
           (insert (propertize padname
                               'face '(:weight bold :height 1.2)))
           (insert "\n\n\n")
+          ;; display the flashcard prompt only if it exists
+          (let ((question (cdr (assq :question item))))
+            (when (and question (not (string-empty-p question)))
+              (insert (propertize "  Prompt / Question:\n" 'face 'shadow))
+              (insert (propertize (format "  %s\n\n\n" question) 'face '(:weight bold :height 1.1)))))
           (insert (propertize
                    "  Recall from memory before revealing.\n"
                    'face '(:slant italic)))

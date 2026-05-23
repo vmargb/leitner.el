@@ -4,22 +4,28 @@
 #+LICENSE: GPL-3.0-or-later
 
 ** What is Leitner?
- =leitner.el= is an Emacs package that applies the =Leitner box system= to your org-mode notes. It is designed for people who take extensive notes but rarely revisit them(or have too many to review). I often combine this with the =feynman technique= to re-explain my org-notes from memory before revealing them.
+=leitner.el= is an Emacs package that applies the classic =Leitner box system= to your note-taking workflow. It is specifically designed for people who take extensive, long-form notes but rarely revisit them (or find themselves overwhelmed by the volume of material to review)
 
  *Leitner* does /not/ replace flashcard apps or other =SRS= packages, instead it complements your existing note-taking workflow by making spaced review a natural part of it.
 
-*** How It Works
- Each file starts in Box 1. After reviewing a file, you rate your recall confidence:
- - /Good/: The file moves up one box (e.g., Box 1 -> Box 2).
- - /Bad/: The file resets to Box 1.
- - /Skip/: The file stays in its current box.
+** How It Works
+Each newly added file begins its journey in *Box 1*. Whenever a file is due, you review it and rate your recall confidence:
+- /Good/: The file advances up by one box level (e.g., Box 1 -> Box 2). Once a file passes the final box and is marked "Good," it *graduates* and leaves the active review rotation.
+- /Bad/: Prompts you to either step it back one box level (Hard recall) or reset it completely back to Box 1 (Complete blank).
+- /Skip/: Leaves the file in its current box without altering its schedule.
 
  Each box has a defined review interval (e.g., Box 1 = 1 day, Box 2 = 3 days). Files are only shown for review when their interval has elapsed since the last review. Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the active review queue.
 
+*** Review Scheduling & Smart Shuffling
+=leitner.el= features a multi-tiered queue system. When a session begins, all due files are first randomly shuffled using the Fisher-Yates algorithm. Then they are stable-sorted by box number. This ensures that low-level boxes (where memory is shakier) are prioritized first. And the sequence of notes /within/ each box level is completely fresh and randomized every session.
 
-** What this is not
- This is *not* a flashcard app. Insead you review entire org files, rather than a question & answer box(but you can do this too). Additionally, your note files are /never modified/, all scheduling metadata is stored in an external JSON file. So the format itself doesn't matter, this works with org, markdown, plain text, or anything else.
+*** Optional question prompts
+Though this is built around reviewing entire long-form documents, you can optionally add specific question prompts with =leitner-set-question= to an org file thats already in a group to create standard Q&A flashcards.
 
+** What This Is Not
+This is *not* a traditional flashcard system aimed at atomic facts (definitions, vocab lists). It is a *file-level reviewing tool*.
+- You review entire files rather than single fragments.
+- Your note files are /never modified/. All scheduling metadata lives entirely in an external JSON index file, meaning it works across Org-mode, Markdown, plain text, or any other layout you prefer.
 
 ** Installation with =package-vc-install= (emacs 29+)
  Add the following to your Emacs configuration (e.g., ~init.el~), you can assign your own intervals and file-path, otherwise it will use the user emacs directory:
@@ -34,8 +40,6 @@
  #+END_SRC
 
 *** Customization
- Leitner provides come custom variables to tailor the experience to
- your needs:
  - =leitner-index-file=: Path to the JSON file storing all review metadata.
    Default: =~/var/leitner.json= (relative to =user-emacs-directory=).
 
@@ -49,7 +53,7 @@
  #+BEGIN_SRC emacs-lisp
  (setq leitner-index-file "~/notes/.leitner-index.json")
  (setq leitner-box-intervals [1 2 4 8 16 32])
- (setq leitner-default-group "Work")
+ (setq leitner-default-group "Study")
  #+END_SRC
 
 ** Quick Start
