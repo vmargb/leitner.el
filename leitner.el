@@ -878,6 +878,7 @@ and rate your recall when done"
     (define-key map (kbd "a")   #'leitner-add-file)
     (define-key map (kbd "A")   #'leitner-add-group)
     (define-key map (kbd "d")   #'leitner-menu-delete-group)
+    (define-key map (kbd "R")   #'leitner-menu-rename-group)
     (define-key map (kbd "s")   #'leitner-start-session)      ; review ALL groups
     (define-key map (kbd "S")   #'leitner-save)
     (define-key map (kbd "g")   #'revert-buffer)
@@ -975,11 +976,45 @@ and rate your recall when done"
       (leitner-save)
       (tabulated-list-print t))))
 
+(defun leitner-menu-rename-group ()
+  "Rename the group name on the current dashboard line."
+  (interactive)
+  (let ((old-name (tabulated-list-get-id)))
+    (unless old-name
+      (user-error "Leitner: no group on current line"))
+    (let ((new-name (string-trim (read-string (format "Rename group '%s' to: " old-name) old-name))))
+      (cond
+       ((string-empty-p new-name)
+        (user-error "Leitner: group name cannot be empty"))
+       ((equal old-name new-name)
+        (message "Leitner: name unchanged."))
+       ((leitner--get-group new-name)
+        (user-error "Leitner: group '%s' already exists" new-name))
+       (t
+        (let ((group-alist (leitner--get-group old-name)))
+          ;; update :name field in-place
+          (setcdr (assq :name group-alist) new-name)
+          ;; move to new hash key
+          (puthash new-name group-alist (leitner--groups-ht))
+          (remhash old-name (leitner--groups-ht))
+          ;; sync open detail buffer if it exists
+          (let ((detail-buf (get-buffer (format "*Leitner: %s*" old-name))))
+            (when detail-buf
+              (with-current-buffer detail-buf
+                (setq leitner--gv-group new-name)
+                (rename-buffer (format "*Leitner: %s*" new-name) t)
+                (setq header-line-format (leitner--gv-build-header new-name))
+                (tabulated-list-print t))))
+          (leitner--mark-dirty)
+          (leitner-save)
+          (tabulated-list-print t)
+          (message "Leitner: group renamed to '%s'." new-name)))))))
+
 (defun leitner-menu-help ()
   "Echo dashboard keybindings to minibuffer."
   (interactive)
   (message
-   "Leitner: RET view-group  r review-group  s review-all  a add-file  A new-group  d delete  S save  g refresh"))
+   "Leitner: RET view  r review  s review-all  a add-file  A new-group  R rename  d delete  S save  g refresh"))
 
 (defun leitner--maybe-refresh-dashboard ()
   "Silently refresh the dashboard buffer if it is alive."
