@@ -49,6 +49,14 @@
 ;;   leitner-box-intervals   vector of per-box intervals in days
 ;;   leitner-default-group   group used when none is specified
 ;;
+;;   PROMPTS / QUESTIONS
+;;
+;;   To show a question on the front card, either add it through `leitner-add-file'
+;;   or manually add a keyword near the top of your file:
+;;     #+LEITNER_PROMPT: example prompt
+;;
+;;   if no #+LEITNER_PROMPT: is found, leitner falls back to #+TITLE:.
+;;
 ;;   DASHBOARD KEYS
 ;;
 ;;   RET   Open the file list for that group (group detail view)
@@ -171,17 +179,13 @@ Graduated items are never due -- they have left the active queue."
             (- (leitner--now) lr))
          86400.0))))
 
-(defun leitner--make-item (path &optional question)
-  "Return a fresh item-alist for PATH placed in Box 1.
-Attach question to the item if QUESTION is provided and not empty."
+(defun leitner--make-item (path)
+  "Return a fresh item-alist for PATH placed in Box 1."
   (list (cons :path          (expand-file-name path))
         (cons :box           1)
         (cons :last-reviewed 0)
         (cons :added         (leitner--now))
-        (cons :graduated     nil)
-        (cons :question      (if (and question (not (string-empty-p question)))
-                                 question
-                               nil))))
+        (cons :graduated     nil)))
 
 (defun leitner--item-graduated-p (item)
   "Return non-nil when ITEM has been graduated (fully mastered)."
@@ -204,8 +208,7 @@ Attach question to the item if QUESTION is provided and not empty."
                                    (cdr (assq :last-reviewed item))
                                  (leitner--now)))
           (cons :added         (cdr (assq :added item)))
-          (cons :graduated     (if graduating (leitner--now) nil))
-          (cons :question      (cdr (assq :question item))))))
+          (cons :graduated     (if graduating (leitner--now) nil)))))
 
 (defun leitner--format-ts (ts)
   "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0."
@@ -219,6 +222,52 @@ Attach question to the item if QUESTION is provided and not empty."
       (let ((j (+ i (random (- (length v) i)))))
         (cl-rotatef (aref v i) (aref v j))))
     (append v nil)))
+
+(defun leitner--extract-prompt (path)
+  "Scan the first 1000 bytes of PATH for a review prompt.
+Looks for #+LEITNER_PROMPT: first, then falls back to #+TITLE:."
+  (when (file-exists-p path)
+    (with-temp-buffer
+      (insert-file-contents path nil 1 1000)
+      (goto-char (point-min))
+      (cond
+       ((re-search-forward "^#\\+LEITNER_PROMPT:\\s-*\\(.*\\)$" nil t)
+        (match-string-no-properties 1))
+       ((re-search-forward "^#\\+TITLE:\\s-*\\(.*\\)$" nil t)
+        (match-string-no-properties 1))
+       (t nil))))) ; returns nil for non-org files
+
+
+;; if the file is already open in a buffer, edit the live buffer and
+;; calls `save-buffer'. If it is not open then use a temp buffer and
+;; `write-region' to write directly to disk
+(defun leitner--insert-prompt-keyword (path prompt)
+  "Insert a #+LEITNER_PROMPT: line containing PROMPT into PATH.
+Places the keyword immediately after an existing #+TITLE: line (matched
+case-insensitively, so Denote's lowercase #+title: is handled correctly)"
+  (let ((title-re "^#\\+[Tt][Ii][Tt][Ll][Ee]:.*$")
+        (existing-buf (get-file-buffer path)))
+    (if existing-buf
+        ;; file already open edit the live buffer
+        (with-current-buffer existing-buf
+          (save-excursion
+            (goto-char (point-min))
+            (if (re-search-forward title-re (+ (point-min) 1000) t)
+                (progn (end-of-line)
+                       (insert (format "\n#+LEITNER_PROMPT: %s" prompt)))
+              (goto-char (point-min))
+              (insert (format "#+LEITNER_PROMPT: %s\n" prompt))))
+          (save-buffer))
+      ;; file not open write directly
+      (with-temp-buffer
+        (insert-file-contents path)
+        (goto-char (point-min))
+        (if (re-search-forward title-re (+ (point-min) 1000) t)
+            (progn (end-of-line)
+                   (insert (format "\n#+LEITNER_PROMPT: %s" prompt)))
+          (goto-char (point-min))
+          (insert (format "#+LEITNER_PROMPT: %s\n" prompt)))
+        (write-region (point-min) (point-max) path nil 'silent)))))
 
 ;; ===========================================================================
 ;;  Data Access
@@ -339,8 +388,6 @@ Attach question to the item if QUESTION is provided and not empty."
                          (cons 'last_reviewed (cdr (assq :last-reviewed item)))
                          (cons 'added         (cdr (assq :added item)))
                          (cons 'graduated     (or (cdr (assq :graduated item))
-                                                  :json-false))
-                         (cons 'question      (or (cdr (assq :question item))
                                                   :json-false))))
                  items))))
              ;; gname is a string; json-encode-key handles strings directly.
@@ -363,20 +410,19 @@ Attach question to the item if QUESTION is provided and not empty."
              (items
               (mapcar
                (lambda (raw)
-                 (let ((grad (cdr (assoc "graduated" raw)))
-                       (quest (cdr (assoc "question" raw))))
+                 (let ((grad (cdr (assoc "graduated" raw))))
                    (list (cons :path          (cdr (assoc "path"          raw)))
                          (cons :box           (cdr (assoc "box"           raw)))
                          (cons :last-reviewed (cdr (assoc "last_reviewed" raw)))
                          (cons :added         (cdr (assoc "added"         raw)))
                          ;; JSON false/null both come back as nil in Emacs
-                         ;; a real timestamp is an integer, keep it as-is
+                         ;; a real timestamp is an integer
+                         ;; legacy "question" field is intentionally
+                         ;; ignored prompts are now read live from the
+                         ;; file via `leitner--extract-prompt'
                          (cons :graduated     (if (or (null grad)
                                                       (eq grad :json-false))
-                                                  nil grad))
-                         (cons :question      (if (or (null quest)
-                                                      (eq quest :json-false))
-                                                  nil quest)))))
+                                                  nil grad)))))
                items-list)))
         (puthash gname
                  (list (cons :name gname) (cons :items items))
@@ -443,7 +489,8 @@ Attach question to the item if QUESTION is provided and not empty."
 ;;;###autoload
 (defun leitner-add-file (&optional file group)
   "Add FILE to GROUP for spaced repetition.
-Prompts for a group and defaults to the current buffer's file."
+Prompts for a group and defaults to the current buffer's file.
+When called interactively, also offers to set a #+LEITNER_PROMPT"
   (interactive)
   (leitner--ensure-data)
   (let* ((target (expand-file-name
@@ -451,22 +498,23 @@ Prompts for a group and defaults to the current buffer's file."
                       (buffer-file-name)
                       (read-file-name "File to add: " nil nil t))))
          (grp (or group (leitner--read-group-name)))
-         (question ; optional question prompt when adding a card
+         (prompt
           (when (called-interactively-p 'any)
-            (when (y-or-n-p (format "Set a question prompt for '%s'? "
-                                    (file-name-nondirectory target)))
-              (read-string "Question prompt (leave blank to skip): ")))))
+            (let ((s (read-string
+                      (format "#+LEITNER_PROMPT for '%s' (RET to skip): "
+                              (file-name-nondirectory target)))))
+              (unless (string-empty-p s) s)))))
     (if (leitner--path-registered-p target grp)
         (message "Leitner: '%s' is already in group '%s'."
                  (file-name-nondirectory target) grp)
-      (leitner--prepend-item grp (leitner--make-item target question))
+      (when prompt
+        (leitner--insert-prompt-keyword target prompt))
+      (leitner--prepend-item grp (leitner--make-item target))
       (leitner--mark-dirty)
       (leitner-save)
       (message "Leitner: added '%s' to group '%s' (Box 1)%s."
                (file-name-nondirectory target) grp
-               (if (and question (not (string-empty-p question)))
-                   " with question prompt"
-                 ""))
+               (if prompt " with #+LEITNER_PROMPT" ""))
       (leitner--maybe-refresh-dashboard))))
 
 ;;;###autoload
@@ -502,31 +550,6 @@ Prompts for a group and defaults to the current buffer's file."
     (leitner-save)
     (message "Leitner: group '%s' created." name)
     (leitner--maybe-refresh-dashboard)))
-
-;;;###autoload
-(defun leitner-set-question (question)
-  "Set or update the optional flashcard QUESTION for the current file."
-  (interactive "sQuestion prompt (leave blank to remove): ")
-  (leitner--ensure-data)
-  (let ((path (buffer-file-name)))
-    (unless path
-      (user-error "Leitner: Current buffer is not visiting a file"))
-    (setq path (expand-file-name path))
-    (let ((pair (leitner--path-registered-p path)))
-      (if (not pair)
-          (user-error "Leitner: Current file is not registered in any group")
-        (let* ((gname (car pair))
-               (old-item (cdr pair))
-               (new-item (list (cons :path          (cdr (assq :path old-item)))
-                               (cons :box           (cdr (assq :box old-item)))
-                               (cons :last-reviewed (cdr (assq :last-reviewed old-item)))
-                               (cons :added         (cdr (assq :added old-item)))
-                               (cons :graduated     (cdr (assq :graduated old-item)))
-                               (cons :question      (if (string-empty-p question) nil question)))))
-          (leitner--replace-item gname path new-item)
-          (leitner--mark-dirty)
-          (leitner-save)
-          (message "Leitner: Question updated for '%s'." (file-name-nondirectory path)))))))
 
 ;; ===========================================================================
 ;;  Review Session
@@ -697,11 +720,11 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
           (insert (propertize padname
                               'face '(:weight bold :height 1.2)))
           (insert "\n\n\n")
-          ;; display the flashcard prompt only if it exists
-          (let ((question (cdr (assq :question item))))
-            (when (and question (not (string-empty-p question)))
+          ;; display the flashcard prompt only if one is found in the file
+          (let ((prompt (leitner--extract-prompt path)))
+            (when (and prompt (not (string-empty-p prompt)))
               (insert (propertize "  Prompt / Question:\n" 'face 'shadow))
-              (insert (propertize (format "  %s\n\n\n" question) 'face '(:weight bold :height 1.1)))))
+              (insert (propertize (format "  %s\n\n\n" prompt) 'face '(:weight bold :height 1.1)))))
           (insert (propertize
                    "  Recall from memory before revealing.\n"
                    'face '(:slant italic)))
