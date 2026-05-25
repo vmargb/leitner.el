@@ -118,6 +118,8 @@ Index 0 = Box 1 (reviewed most frequently)."
 (defcustom leitner-before-review-hook nil
   "Hook run right after a note file is revealed in a review session.")
 
+;; there are three types of completions
+;; natural completion, early exit and front quit
 (defcustom leitner-after-session-hook nil
   "Hook run immediately after a review session is fully completed.")
 
@@ -730,8 +732,9 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (leitner-save)
     (leitner--maybe-refresh-dashboard)
     (message "Leitner: session complete, %d file%s reviewed.  Index saved."
-             n (if (= n 1) "" "s"))))
-
+             n (if (= n 1) "" "s"))
+             
+    (run-hooks 'leitner-after-session-hook)))
 
 ;; =========================================================================
 ;;  Front Card: recall before reveal
@@ -836,7 +839,9 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (setq-local leitner--review-item  item)
     (setq-local leitner--review-group gname)
     (leitner-review-minor-mode 1)
-    (kill-buffer fc)))
+    (kill-buffer fc)
+    
+    (run-hooks 'leitner-before-review-hook)))
 
 (defun leitner-front-skip ()
   "Skip the current front card without revealing."
@@ -860,7 +865,9 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (setq leitner--session nil)
     (leitner-save)
     (kill-buffer (current-buffer))
-    (message "Leitner: session ended.  Index saved.")))
+    (message "Leitner: session ended.  Index saved.")
+    
+    (run-hooks 'leitner-after-session-hook)))
 
 (defun leitner-front-help ()
   "Show front-card keybindings in the echo area."
@@ -965,7 +972,9 @@ and rate your recall when done"
       (leitner-review-minor-mode -1))
     (setq leitner--session nil)
     (leitner-save)
-    (message "Leitner: session ended.  Index saved.")))
+    (message "Leitner: session ended.  Index saved.")
+    
+    (run-hooks 'leitner-after-session-hook)))
 
 (defun leitner-review-help ()
   "Echo review keybindings in minibuffer."
