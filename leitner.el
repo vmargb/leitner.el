@@ -491,6 +491,25 @@ ACTIVE is any non-graduated items for a group."
                        (cdr (assq :dirty leitner--data)))
               (leitner-save))))
 
+;;;###autoload
+(defun leitner-healthcheck ()
+  "Check all tracked files and remove entries that no longer exist on disk."
+  (interactive)
+  (leitner--ensure-data)
+  (let ((counter 0))
+    (maphash (lambda (gname _g)
+               (let ((filtered (seq-filter (lambda (it)
+                                             (let ((exists (file-exists-p (cdr (assq :path it)))))
+                                               (unless exists (cl-incf counter))
+                                               exists))
+                                           (leitner--group-items gname))))
+                 (leitner--set-group-items gname filtered)))
+             (leitner--groups-ht))
+    (if (> counter 0)
+        (progn (leitner--mark-dirty) (leitner-save)
+               (message "Leitner: Pruned %d missing file(s) from index." counter))
+      (message "Leitner: All tracked files are intact."))))
+
 
 ;; =========================================================================
 ;;  Adding / Removing / Resetting Files
