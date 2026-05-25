@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.2.1
+;; Version: 0.2.2
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -352,6 +352,23 @@ case-insensitively, so Denote's lowercase #+title: is handled correctly)"
      (and (or (null group-name) (equal (car pair) group-name))
           (leitner--item-due-p (cdr pair))))
    (leitner--all-pairs)))
+
+(defun leitner--group-next-due-str (active)
+  "Return a string for when the next item in ACTIVE becomes due.
+ACTIVE is any non-graduated items for a group."
+  (let ((min-days nil))
+    (dolist (item active)
+      (when (not (leitner--item-due-p item))
+        (let ((d (leitner--item-days-until-due item)))
+          (when (> d 0)
+            (setq min-days (if min-days (min min-days d) d))))))
+    (cond
+     (min-days
+      (if (< min-days 1)
+          (propertize "<1d" 'face 'font-lock-keyword-face)
+        (propertize (format "%dd" (floor min-days)) 'face 'font-lock-keyword-face)))
+     (active  (propertize "0d" 'face 'warning))
+     (t       "—")))) ; the only time an em-dash is acceptable
 
 (defun leitner--path-registered-p (path &optional group-name)
   "Return non-nil if PATH is already registered (optionally in GROUP-NAME)."
@@ -914,7 +931,8 @@ and rate your recall when done"
   (vconcat
    (list (list "Group"  26 t)
          (list "Files"   7 t)
-         (list "Due"     5 t))
+         (list "Due"     5 t)
+         (list "Next"    6 t))
    (cl-loop for i from 1 to (leitner--num-boxes)
             collect (list (format "B%d" i) 5 t))
    (list (list "Grad" 5 t))))
@@ -945,6 +963,7 @@ and rate your recall when done"
               (n      (length items))
               (active (seq-filter (lambda (it) (not (leitner--item-graduated-p it))) items))
               (due    (length (seq-filter #'leitner--item-due-p active)))
+              (next  (leitner--group-next-due-str active))
               (grad   (- n (length active)))
               (boxes  (make-vector nb 0)))
          (dolist (item active)
@@ -956,7 +975,8 @@ and rate your recall when done"
                       (number-to-string n)
                       (if (> due 0)
                           (propertize (number-to-string due) 'face 'warning)
-                        "0"))
+                        "0")
+                      next)
                 (cl-loop for i from 0 below nb
                          collect (number-to-string (aref boxes i)))
                 (list (if (> grad 0)
