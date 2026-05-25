@@ -571,36 +571,63 @@ Nothing is written until the interactive pass is complete."
          (pr      (or prompt (format "Group (default %s): " default))))
     (completing-read pr names nil nil nil nil default)))
 
+;; the per-file #+LEITNER_PROMPT is not set in batch mode
+;; if batch using batch mode. Use have to use `leitner-add-file'
+;; in each files own buffer afterwards or manually add the metadata
 ;;;###autoload
 (defun leitner-add-file (&optional file group)
   "Add FILE to GROUP for spaced repetition.
-Prompts for a group and defaults to the current buffer's file.
-When called interactively, also offers to set a #+LEITNER_PROMPT"
+When called interactively from a `dired' buffer, it bulk-adds all marked files
+to a single group in one go, folders and already-registered files are skipped."
   (interactive)
   (leitner--ensure-data)
-  (let* ((target (expand-file-name
-                  (or file
-                      (buffer-file-name)
-                      (read-file-name "File to add: " nil nil t))))
-         (grp (or group (leitner--read-group-name)))
-         (prompt
-          (when (called-interactively-p 'any)
-            (let ((s (read-string
-                      (format "#+LEITNER_PROMPT for '%s' (RET to skip): "
-                              (file-name-nondirectory target)))))
-              (unless (string-empty-p s) s)))))
-    (if (leitner--path-registered-p target grp)
-        (message "Leitner: '%s' is already in group '%s'."
-                 (file-name-nondirectory target) grp)
-      (when prompt
-        (leitner--insert-prompt-keyword target prompt))
-      (leitner--prepend-item grp (leitner--make-item target))
-      (leitner--mark-dirty)
-      (leitner-save)
-      (message "Leitner: added '%s' to group '%s' (Box 1)%s."
-               (file-name-nondirectory target) grp
-               (if prompt " with #+LEITNER_PROMPT" ""))
-      (leitner--maybe-refresh-dashboard))))
+  (if (and (called-interactively-p 'any) (derived-mode-p 'dired-mode))
+      ;; Dired batch path
+      (let* ((files (seq-filter (lambda (f) (not (file-directory-p f)))
+                                (dired-get-marked-files)))
+             (_ (unless files (user-error "Leitner: no files marked in Dired")))
+             (grp     (leitner--read-group-name))
+             (added   0)
+             (skipped 0))
+        (dolist (f files)
+          (let ((abs (expand-file-name f)))
+            (if (leitner--path-registered-p abs grp)
+                (cl-incf skipped)
+              (leitner--prepend-item grp (leitner--make-item abs))
+              (cl-incf added))))
+        (when (> added 0)
+          (leitner--mark-dirty)
+          (leitner-save)
+          (leitner--maybe-refresh-dashboard))
+        (message "Leitner: added %d file(s) to group '%s'%s."
+                 added grp
+                 (if (> skipped 0)
+                     (format ", skipped %d already registered" skipped)
+                   "")))
+    ;; single-file (standard behaviour)
+    (let* ((target (expand-file-name
+                    (or file
+                        (buffer-file-name)
+                        (read-file-name "File to add: " nil nil t))))
+           (grp (or group (leitner--read-group-name)))
+           (prompt
+            (when (called-interactively-p 'any)
+              (let ((s (read-string
+                        (format "#+LEITNER_PROMPT for '%s' (RET to skip): "
+                                (file-name-nondirectory target)))))
+                (unless (string-empty-p s) s)))))
+      (if (leitner--path-registered-p target grp)
+          (message "Leitner: '%s' is already in group '%s'."
+                   (file-name-nondirectory target) grp)
+        (when prompt
+          (leitner--insert-prompt-keyword target prompt))
+        (leitner--prepend-item grp (leitner--make-item target))
+        (leitner--mark-dirty)
+        (leitner-save)
+        (message "Leitner: added '%s' to group '%s' (Box 1)%s."
+                 (file-name-nondirectory target) grp
+                 (if prompt " with #+LEITNER_PROMPT" ""))
+        (leitner--maybe-refresh-dashboard)))))
 
 ;;;###autoload
 (defun leitner-remove-file (&optional file)
