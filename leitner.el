@@ -491,24 +491,61 @@ ACTIVE is any non-graduated items for a group."
                        (cdr (assq :dirty leitner--data)))
               (leitner-save))))
 
+(defun leitner--all-tracked-paths ()
+  "Return a list of all absolute paths currently in the index."
+  (let (paths)
+    (maphash (lambda (_gname _g)
+               (dolist (item (leitner--group-items _gname))
+                 (push (cdr (assq :path item)) paths)))
+             (leitner--groups-ht))
+    paths))
+
+
+;; For each missing file:
+;;   [r]emap  – locate the file yourself with a file prompt (preserves all SR history)
+;;   [p]rune  – remove the entry from the index entirely
+;;   [s]kip   – leave the entry stale for now
 ;;;###autoload
 (defun leitner-healthcheck ()
-  "Check all tracked files and remove entries that no longer exist on disk."
+  "Check all files, interactively remap moved/renamed ones, prune gone ones.
+Nothing is written until the interactive pass is complete."
   (interactive)
   (leitner--ensure-data)
-  (let ((counter 0))
+  (let ((missing '()))
     (maphash (lambda (gname _g)
-               (let ((filtered (seq-filter (lambda (it)
-                                             (let ((exists (file-exists-p (cdr (assq :path it)))))
-                                               (unless exists (cl-incf counter))
-                                               exists))
-                                           (leitner--group-items gname))))
-                 (leitner--set-group-items gname filtered)))
+               (dolist (item (leitner--group-items gname))
+                 (unless (file-exists-p (cdr (assq :path item)))
+                   (push (cons gname item) missing))))
              (leitner--groups-ht))
-    (if (> counter 0)
-        (progn (leitner--mark-dirty) (leitner-save)
-               (message "Leitner: Pruned %d missing file(s) from index." counter))
-      (message "Leitner: All tracked files are intact."))))
+    (if (null missing)
+        (message "Leitner: All tracked files are intact.")
+      (let ((remapped 0) (pruned 0) (skipped 0))
+        (dolist (pair missing)
+          (let* ((gname    (car pair))
+                 (item     (cdr pair))
+                 (old-path (cdr (assq :path item)))
+                 (choice   (read-char-choice
+                            (format "Missing: %s\n  [r]emap  [p]rune  [s]kip? " old-path)
+                            '(?r ?p ?s))))
+            (pcase choice
+              (?r (let ((new-path (expand-file-name
+                                   (read-file-name
+                                    (format "New path for %s: "
+                                            (file-name-nondirectory old-path))
+                                    (file-name-directory old-path)))))
+                    (setcdr (assq :path item) new-path)
+                    (cl-incf remapped)))
+              (?p (leitner--set-group-items
+                   gname
+                   (seq-remove (lambda (it) (equal it item))
+                               (leitner--group-items gname)))
+                  (cl-incf pruned))
+              (?s (cl-incf skipped)))))
+        (when (> (+ remapped pruned) 0)
+          (leitner--mark-dirty)
+          (leitner-save))
+        (message "Leitner healthcheck: %d remapped, %d pruned, %d skipped."
+                 remapped pruned skipped)))))
 
 
 ;; =========================================================================
