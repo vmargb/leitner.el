@@ -112,6 +112,16 @@ Index 0 = Box 1 (reviewed most frequently)."
   :group 'leitner)
 
 
+;; hooks
+;; use with olivetti, writeroom in org-mode reviews
+
+(defcustom leitner-before-review-hook nil
+  "Hook run right after a note file is revealed in a review session.")
+
+(defcustom leitner-after-session-hook nil
+  "Hook run immediately after a review session is fully completed.")
+
+
 ;; ===========================================================================
 ;;  Internal State
 ;; ===========================================================================

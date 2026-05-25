@@ -4,7 +4,7 @@
 #+LICENSE: GPL-3.0-or-later
 
 ** What is Leitner?
-=leitner.el= is an Emacs package that applies the classic =Leitner box system= to your note-taking workflow. It is specifically designed for people who take extensive, *long-form* notes but rarely revisit them, or find themselves overwhelmed by the volume of material to review. Rather than forgetting about your notes and letting them idle away in a folder somewhere, you simply use =leitner-add-file= and allow it to resurface the file for your next review.
+=leitner.el= is an Emacs package that applies the classic =Leitner box system= to your note-taking workflow. It is specifically designed for people who take extensive, *long-form* notes but rarely revisit them, or find themselves overwhelmed by the volume of material to review. Rather than forgetting about your notes and letting them idle away in a folder somewhere, you simply use =leitner-add-file= and allow it to take care of when to resurface the file for your next review.
 
  *Leitner* does /not replace/ flashcard apps or other =SRS= packages, instead it complements your existing note-taking system/workflow by making spaced review a natural part of it.
 
