@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.2.2
+;; Version: 0.2.3
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
