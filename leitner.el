@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.2.3
+;; Version: 0.2.4
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -48,6 +48,22 @@
 ;;   leitner-index-file      where the JSON index lives
 ;;   leitner-box-intervals   vector of per-box intervals in days
 ;;   leitner-default-group   group used when none is specified
+;;
+;;   SM-2 HYBRID MODE (optional)
+;;
+;;   set `leitner-sm2-hybrid' to enable adaptive sm-2 based interval scaling
+;;   Each item grows a personal ease factor (EF) that multiplies its box
+;;   interval.  The Leitner box structure is still fully preserved only the
+;;   spacing between reviews adapts to how well you know each individual file
+;;
+;;     (setq leitner-sm2-hybrid t)
+;;
+;;   The EF starts at `leitner-sm2-default-ef' (1.0) on purpose and is
+;;   adjusted on every rating:
+;;     Good   +`leitner-sm2-good-bonus'   (default +0.10)
+;;     Hard   -`leitner-sm2-hard-penalty' (default -0.15)
+;;     Reset  -`leitner-sm2-reset-penalty'(default -0.20)
+;;   Clamped to [`leitner-sm2-min-ef', `leitner-sm2-max-ef'] (1.3 -- 4.0).
 ;;
 ;;   PROMPTS / QUESTIONS
 ;;
