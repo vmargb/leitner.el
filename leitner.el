@@ -128,6 +128,63 @@ Index 0 = Box 1 (reviewed most frequently)."
   :group 'leitner)
 
 
+;; ===========================================================================
+;;  SM-2 Hybrid Mode Customisation
+;;
+;; when `leitner-sm2-hybrid' is enabled the pure Leitner box ladder is kept
+;; intact (advancement, demotion, and graduation rules dont change), but each
+;; item carries a personal *ease factor* (EF) that scales the box interval
+;;
+;;   effective_interval = box_interval × ease_factor
+;;
+;; The EF starts at `leitner-sm2-default-ef' which is 1.0, drifts up on Good reviews
+;; and drifts down on Bad/Reset reviews, giving easy material longer breathing room
+;; and keeping hard material tighter all without touching the box structure.
+
+(defcustom leitner-sm2-hybrid nil
+  "Enable the SM-2 ease-factor hybrid scheduling mode.
+each item carries a personal ease factor (EF) that multiplies its box interval."
+  :type 'boolean
+  :group 'leitner)
+
+;; the classic SM-2 default is 2.5, but here its 1.0
+;; to allow dynamic switching between leitner and sm-2
+;; without inflating the due dates, instead they stretch
+;; from where they are
+(defcustom leitner-sm2-default-ef 1.0
+  "Starting ease factor of 1.0 for new items in SM-2 hybrid mode.
+Recommended to be >= `leitner-sm2-min-ef'."
+  :type 'number
+  :group 'leitner)
+
+(defcustom leitner-sm2-min-ef 1.3
+  "The minimum ease factor an item can decay to in SM-2 hybrid mode.
+Prevents extremely short intervals on consistently hard material."
+  :type 'number
+  :group 'leitner)
+
+(defcustom leitner-sm2-max-ef 4.0
+  "Maximum ease factor an item can grow to in SM-2 hybrid mode.
+Prevents intervals completely taking off on very easy material."
+  :type 'number
+  :group 'leitner)
+
+(defcustom leitner-sm2-good-bonus 0.1
+  "Amount added to the ease factor on a Good rating."
+  :type 'number
+  :group 'leitner)
+
+(defcustom leitner-sm2-hard-penalty 0.15
+  "Amount subtracted from the ease factor on a Hard (back-one-box) rating."
+  :type 'number
+  :group 'leitner)
+
+(defcustom leitner-sm2-reset-penalty 0.2
+  "Amount subtracted from the ease factor on a Reset (back-to-box-1) rating."
+  :type 'number
+  :group 'leitner)
+
+
 ;; hooks
 ;; use with olivetti, writeroom in org-mode reviews
 

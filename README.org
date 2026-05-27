@@ -8,46 +8,20 @@
 
  *Leitner* does /not replace/ flashcard apps or other =SRS= packages, instead it complements your existing note-taking system/workflow by making spaced review a natural part of it.
 
-** How It Works
-Each newly added file begins its journey in *Box 1*. Whenever a file is due, you review it and rate your recall confidence:
-- /Good/: The file advances up by one box level (Box 1 -> Box 2). Once a file passes the final box and is marked "Good" it *graduates* and leaves the active review rotation.
-- /Bad/: Prompts you to either step it back one box level (Hard recall) or reset it completely back to Box 1 (Complete blank).
-- /Skip/: Leaves the file in its current box without altering its schedule.
-
- Each box has a defined review interval (e.g., Box 1 = 1 day, Box 2 = 3 days). Files are only shown for review when their interval has elapsed since the last review. Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the active review queue.
-
-*** Review Scheduling & Smart Shuffling
-When a session begins, all due files are first randomly shuffled using the Fisher-Yates algorithm. Then they are stable-sorted by box number. This ensures that low-level boxes (where memory is shakier) are prioritised first. And the sequence of notes /within/ each box level is completely fresh and randomised every session.
-
-*** Optional question prompts
-Though this is built around reviewing long-form documents, you can *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. You can also leave this empty and it will just ignore the prompt entirely.
-
-
 ** Installation with =package-vc-install= (emacs 29+)
  Add the following to your ~init.el~, you can assign your own intervals and file-path, otherwise it will use your user emacs directory:
 
  #+BEGIN_SRC emacs-lisp
    (use-package leitner
      :vc (:url "https://github.com/vmargb/leitner.el")
-     :custom
-     ;; (leitner-index-file "~/notes/.leitner-index.json") ; optional
-     ;; (leitner-box-intervals [1 3 7 14 30 60 90]) ; optional
      :bind ("C-c r l" . leitner))
  #+END_SRC
 
-*** Customization
- - =leitner-index-file=: Path to the JSON file storing all review metadata.
-   Default: =~/var/leitner.json= (relative to =user-emacs-directory=).
- - =leitner-box-intervals=: Review intervals (in days) for each Leitner box.
-   Default: =[1 3 7 14 30 60 90]=. Box 1 (index 0) is reviewed most frequently.
- - =leitner-default-group=: Default group name when none is specified.
-   Default: ="General"=.
-
- Example customization:
+*** Example Customization
  #+BEGIN_SRC emacs-lisp
- (setq leitner-index-file "~/notes/.leitner-index.json")
- (setq leitner-box-intervals [1 2 4 8 16 32])
- (setq leitner-default-group "Study")
+ (setq leitner-index-file "~/notes/.leitner-index.json") ; change location
+ (setq leitner-box-intervals [1 2 4 8 16 32]) ; set your own intervals
+ (setq leitner-default-group "General") ; default when group not provided
  #+END_SRC
 
 ** Quick Start
@@ -56,9 +30,24 @@ Though this is built around reviewing long-form documents, you can *optionally* 
  | =M-x leitner=               | =leitner=               | Open the group dashboard.                 |
  | =M-x leitner-add-group=     | =leitner-add-group=     | Add a new group.                          |
  | =M-x leitner-add-file=      | =leitner-add-file=      | Add the current buffer's file to a group. |
- | =M-x leitner-set-question=  | =leitner-set-question=  | Set an optional question prompt           |
  | =M-x leitner-start-session= | =leitner-start-session= | Start a review session for due files.     |
  | =M-x leitner-healthcheck=   | =leitner-healthcheck=   | Resolve deleted/renamed/moved files.      |
+
+
+** How It Works
+Each box has a defined review interval (Box 1 = 1 day, Box 2 = 3 days). Files are only shown for review when their interval has elapsed since the last review. Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the active review queue.
+
+Each newly added file begins its journey in *Box 1*. Whenever a file is due, you review and rate your recall confidence:
+- /Good/: The file advances up by one box level (Box 1 -> Box 2). Once a file passes the final box and is marked "Good" it *graduates* and leaves the active review rotation.
+- /Bad/: Prompts you to either step it back one box level (Hard recall) or reset it completely back to Box 1 (Complete blank).
+- /Skip/: Leaves the file in its current box without altering its schedule.
+
+*** Review Scheduling & Smart Shuffling
+When a session begins, all due files are first randomly shuffled. Then they are stable-sorted by box number. This ensures that low-level boxes (where memory is shakier) are prioritised first. And the sequence of notes /within/ each box level is completely fresh and randomised every session.
+
+*** Optional question prompts
+Though this is built around reviewing long-form documents, you can *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. You can also leave this empty and it will just ignore the prompt entirely.
+
 
 ** Dashboard and Group Detail
  The dashboard (=M-x leitner=) provides an overview of all your groups and
@@ -86,12 +75,59 @@ Though this is built around reviewing long-form documents, you can *optionally* 
  | q   | Close the group detail view     |
 
 
-
-** Why Leitner and not SM-2, FSRS?
+** Why Leitner and not SM-2, SM-5 FSRS?
 On top of Leitner being much simpler to implement. Leitner's structure is transparent and you control it directly, whereas the others require trusting an algorithm's decision about when something should resurface, which is perfect for cards that are incredibly high in quantity(like vocabulary lists or definitions).
 
 However, in my experience these algorithms seem to matter /less/ for reviewing *longer form* notes that you've taken in markdown or org. In this case you may want to see related material grouped together in fixed boxes with a more predictable spacing effect, that simplicity and control might actually be preferable(at least it is for me).
 
-So my usual workflow is:
-+ High quantity q->a flashcards: =Anki=, =org-drill= (or my other project: [[https://github.com/vmargb/Myoso][Myoso]])
-+ Long form notes/concepts: =leitner=
+However, the SM-2 hybrid mode exists for this middle ground. When you have collections large enough that fixed intervals start feeling too rigid, you can toggle on sm-2, and it will adapt to your existing scheduling data from where you left off.
+
+
+** SM-2 Hybrid Mode (Optional)
+As your collection grows into the hundreds or thousands, you can optionally opt into *SM-2 hybrid mode*. This keeps the Leitner box structure completely intact, but gives each file a personal *ease factor* (EF) that scales its review interval:
+
+#+BEGIN_EXAMPLE
+effective interval = box interval × ease factor
+#+END_EXAMPLE
+
+Files you consistently recall well gradually stretch further apart. Files you struggle with compress closer together. The box number still reflects where a file sits in the ladder. The EF adjusts the spacing around it.
+
+*** Enabling hybrid mode
+
+#+BEGIN_SRC emacs-lisp
+(setq leitner-sm2-hybrid t)
+#+END_SRC
+
+That's it. Enabling it midway through your workflow is safe. All files in the group start with an ease factor of =1.0=, so their intervals are completely unchanged on day one. The EF only begins drifting from actual review behaviour going forward, so that sm-2 doesn't completely take over.
+
+*** How the ease factor works
+
+| Rating | Effect on EF |
+|--------+--------------|
+| Good   | += 0.10      |
+| Hard   | -= 0.15      |
+| Reset  | -= 0.20      |
+| Skip   | no change    |
+
+The EF is always clamped between =1.3= (floor) and =4.0= (ceiling). A file sitting in Box 3 (base interval: 7 days) with an EF of =2.0= will next be reviewed in ~14 days. The same file with an EF of =1.3= will come back in ~9 days.
+
+*** Customization
+
+All SM-2 hybrid parameters are individually tunable to your liking:
+
+#+BEGIN_SRC emacs-lisp
+(setq leitner-sm2-hybrid        t)    ; enable hybrid mode
+(setq leitner-sm2-default-ef    1.0)  ; neutral starting EF for all items
+(setq leitner-sm2-min-ef        1.3)  ; prevents intervals collapsing too far
+(setq leitner-sm2-max-ef        4.0)  ; prevents runaway long intervals
+(setq leitner-sm2-good-bonus    0.10) ; EF gain per Good rating
+(setq leitner-sm2-hard-penalty  0.15) ; EF loss per Hard rating
+(setq leitner-sm2-reset-penalty 0.20) ; EF loss per Reset rating (heavier than Hard)
+#+END_SRC
+
+
+** Changelog
+- /v0.2.3:/ Batch-add multiple files to group through dired mode + automation hooks for extensibility
+- /v0.2.2:/ Rename groups + Healthcheck to resolve rename/delete/moved files in a group
+- /v0.2.1:/ Random box shuffling & optional question prompts for review
+- /v0.2.0:/ Complete Leitner box system implementation with dashboard + algorithm and scheduling metadata.
