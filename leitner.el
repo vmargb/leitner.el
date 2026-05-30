@@ -207,7 +207,8 @@ Prevents intervals completely taking off on very easy material."
 ;; group-alist :  ((:name . STRING)  (:items . LIST-OF-ITEM-ALISTS))
 ;; item-alist  :  ((:path . STRING)  (:box . INT)
 ;;                 (:last-reviewed . INT)  (:added . INT)
-;;                 (:graduated . INT-OR-NIL))   ; Unix ts when graduated, nil if active
+;;                 (:graduated . INT-OR-NIL)    ; Unix ts when graduated, nil if active
+;;                 (:ease . FLOAT-OR-NIL))      ; SM-2 hybrid EF
 ;;
 ;; All mutations go through setcdr+assq to modify the shared cons cells
 ;; in-place.  Never use alist-get as a setf target with a gethash argument
@@ -247,37 +248,63 @@ Prevents intervals completely taking off on very easy material."
   "Review interval in seconds for BOX (1-indexed)."
   (* (leitner--box-days box) 86400))
 
+(defun leitner--item-ease (item)
+  "Return the effective ease factor for each ITEM.
+When SM-2 hybrid is off this always returns 1.0 (no scaling).
+When it is on, return the stored :ease value"
+  (if (not leitner-sm2-hybrid)
+      1.0
+    (let ((ef (cdr (assq :ease item))))
+      (if (and ef (numberp ef)) ef leitner-sm2-default-ef))))
+
+(defun leitner--item-interval-secs (item)
+  "Effective review interval in seconds for ITEM.
+In standard mode this equals `leitner--box-secs' for the item's box.
+In SM-2 hybrid mode the box interval is multiplied by the item's ease factor."
+  (let ((base (leitner--box-secs (cdr (assq :box item)))))
+    (if leitner-sm2-hybrid
+        (round (* base (leitner--item-ease item)))
+      base)))
+
 (defun leitner--item-due-p (item)
   "Return non-nil when ITEM is due for review.
-Graduated items are never due -- they have left the active queue."
+Graduated items are never due since they have left the active queue.
+In SM-2 hybrid mode the effective interval is used."
   (and (not (cdr (assq :graduated item)))
        (let ((lr  (cdr (assq :last-reviewed item)))
              (box (cdr (assq :box item))))
+         (ignore box)
          (or (= lr 0)
-             (>= (- (leitner--now) lr) (leitner--box-secs box))))))
+             (>= (- (leitner--now) lr) (leitner--item-interval-secs item))))))
 
 (defun leitner--item-days-until-due (item)
-  "Days until ITEM is next due; negative = overdue; 0 = never reviewed."
+  "Days until ITEM is next due.  Negative = overdue, 0 = never reviewed.
+In SM-2 hybrid mode the effective interval is used."
   (let ((lr (cdr (assq :last-reviewed item))))
     (if (= lr 0) 0
-      (/ (- (leitner--box-secs (cdr (assq :box item)))
+      (/ (- (leitner--item-interval-secs item)
             (- (leitner--now) lr))
          86400.0))))
 
 (defun leitner--make-item (path)
-  "Return a fresh item-alist for PATH placed in Box 1."
+  "Return a fresh item-alist for PATH placed in Box 1.
+When SM-2 hybrid mode is active, the item is seeded with the default
+ease factor `leitner-sm2-default-ef'."
   (list (cons :path          (expand-file-name path))
         (cons :box           1)
         (cons :last-reviewed 0)
         (cons :added         (leitner--now))
-        (cons :graduated     nil)))
+        (cons :graduated     nil)
+        (cons :ease          leitner-sm2-default-ef)))
 
 (defun leitner--item-graduated-p (item)
   "Return non-nil when ITEM has been graduated (fully mastered)."
   (cdr (assq :graduated item)))
 
 (defun leitner--item-rate (item outcome)
-  "Return a NEW item-alist for ITEM rated with OUTCOME (good / bad / reset / skip)."
+  "Return a NEW item-alist for ITEM rated with OUTCOME.
+In SM-2 hybrid mode the ease factor is adjusted according to the outcome.
+The EF is clamped between `leitner-sm2-min-ef' & `leitner-sm2-max-ef'."
   (let* ((old-box (cdr (assq :box item)))
          (last-box (leitner--num-boxes))
          ;; graduating: good rating on the final box
@@ -286,14 +313,28 @@ Graduated items are never due -- they have left the active queue."
                     ('good (if graduating last-box (1+ old-box)))
                     ('reset  1)
                     ('hard (max 1 (1- old-box)))
-                    ('skip old-box))))
+                    ('skip old-box)))
+         ;; SM-2 hybrid: update ease factor
+         (old-ef (leitner--item-ease item))
+         (new-ef (if leitner-sm2-hybrid
+                     (let ((raw (pcase outcome
+                                  ('good  (+ old-ef leitner-sm2-good-bonus))
+                                  ('hard  (- old-ef leitner-sm2-hard-penalty))
+                                  ('reset (- old-ef leitner-sm2-reset-penalty))
+                                  ('skip  old-ef))))
+                       (max leitner-sm2-min-ef
+                            (min leitner-sm2-max-ef raw)))
+                   ;; not in hybrid mode so preserve whatever EF was stored so
+                   ;; enabling hybrid later picks it up correctly
+                   old-ef)))
     (list (cons :path          (cdr (assq :path item)))
           (cons :box           new-box)
           (cons :last-reviewed (if (eq outcome 'skip)
                                    (cdr (assq :last-reviewed item))
                                  (leitner--now)))
           (cons :added         (cdr (assq :added item)))
-          (cons :graduated     (if graduating (leitner--now) nil)))))
+          (cons :graduated     (if graduating (leitner--now) nil))
+          (cons :ease          new-ef))))
 
 (defun leitner--format-ts (ts)
   "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0."
@@ -490,7 +531,10 @@ ACTIVE is any non-graduated items for a group."
                          (cons 'last_reviewed (cdr (assq :last-reviewed item)))
                          (cons 'added         (cdr (assq :added item)))
                          (cons 'graduated     (or (cdr (assq :graduated item))
-                                                  :json-false))))
+                                                  :json-false))
+                         ;; :ease is always written, older readers ignore it
+                         (cons 'ease          (or (cdr (assq :ease item))
+                                                  leitner-sm2-default-ef))))
                  items))))
              ;; gname is a string; json-encode-key handles strings directly.
              (push (cons gname (list (cons 'name  gname)
@@ -512,7 +556,8 @@ ACTIVE is any non-graduated items for a group."
              (items
               (mapcar
                (lambda (raw)
-                 (let ((grad (cdr (assoc "graduated" raw))))
+                 (let ((grad (cdr (assoc "graduated" raw)))
+                       (ease (cdr (assoc "ease" raw))))
                    (list (cons :path          (cdr (assoc "path"          raw)))
                          (cons :box           (cdr (assoc "box"           raw)))
                          (cons :last-reviewed (cdr (assoc "last_reviewed" raw)))
@@ -524,7 +569,11 @@ ACTIVE is any non-graduated items for a group."
                          ;; file via `leitner--extract-prompt'
                          (cons :graduated     (if (or (null grad)
                                                       (eq grad :json-false))
-                                                  nil grad)))))
+                                                  nil grad))
+                         ;; :ease: fall back to default for pre-hybrid items
+                         (cons :ease          (if (and ease (numberp ease))
+                                                  ease
+                                                leitner-sm2-default-ef)))))
                items-list)))
         (puthash gname
                  (list (cons :name gname) (cons :items items))
@@ -818,9 +867,13 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
                      ('hard (if (= (cdr (assq :box new-item)) 1)
                                     (propertize "Already in Box 1" 'face 'warning)
                                   (format "Down -> Box %d" (cdr (assq :box new-item)))))
-                     ('skip "Skipped"))))
-      (message "Leitner: %s  (%d / %d done)"
+                     ('skip "Skipped")))
+           (ef-suffix (if (and leitner-sm2-hybrid (not (eq outcome 'skip)))
+                          (format "  [EF %.2f]" (leitner--item-ease new-item))
+                        "")))
+      (message "Leitner: %s%s  (%d / %d done)"
                label
+               ef-suffix
                (cdr (assq :reviewed leitner--session))
                (cdr (assq :total    leitner--session))))
     (leitner--session-advance)))
@@ -832,9 +885,8 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (leitner-save)
     (leitner--maybe-refresh-dashboard)
     (message "Leitner: session complete, %d file%s reviewed.  Index saved."
-             n (if (= n 1) "" "s"))
-             
-    (run-hooks 'leitner-after-session-hook)))
+             n (if (= n 1) "" "s"))))
+
 
 ;; =========================================================================
 ;;  Front Card: recall before reveal
@@ -897,9 +949,14 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
           (insert (propertize (concat "  " rule "\n") 'face 'shadow))
           (insert "\n")
           (insert (format "  Group:          %s\n" gname))
-          (insert (format "  Box:            %d  (every %d day%s)\n"
+          (insert (format "  Box:            %d  (every %d day%s%s)\n"
                           box interval
-                          (if (= interval 1) "" "s")))
+                          (if (= interval 1) "" "s")
+                          (if leitner-sm2-hybrid
+                              (let* ((ef  (leitner--item-ease item))
+                                     (eff (round (* interval ef))))
+                                (format "  |  EF %.2f  ->  ~%dd effective" ef eff))
+                            "")))
           (insert (format "  Last reviewed:  %s\n"
                           (leitner--format-ts lr)))
           (insert "\n\n")
@@ -939,9 +996,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (setq-local leitner--review-item  item)
     (setq-local leitner--review-group gname)
     (leitner-review-minor-mode 1)
-    (kill-buffer fc)
-    
-    (run-hooks 'leitner-before-review-hook)))
+    (kill-buffer fc)))
 
 (defun leitner-front-skip ()
   "Skip the current front card without revealing."
@@ -965,9 +1020,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (setq leitner--session nil)
     (leitner-save)
     (kill-buffer (current-buffer))
-    (message "Leitner: session ended.  Index saved.")
-    
-    (run-hooks 'leitner-after-session-hook)))
+    (message "Leitner: session ended.  Index saved.")))
 
 (defun leitner-front-help ()
   "Show front-card keybindings in the echo area."
@@ -1012,7 +1065,8 @@ and rate your recall when done"
     (remove-hook 'kill-buffer-hook #'leitner--on-review-buffer-kill t)))
 
 (defun leitner--build-review-header ()
-  "Constructs the header-line string for the current file being reviewed."
+  "Constructs the header-line string for the current file being reviewed.
+In SM-2 hybrid mode the current ease factor is appended after the box number."
   (when (and leitner--review-item leitner--session)
     (let ((box      (cdr (assq :box leitner--review-item)))
           (reviewed (cdr (assq :reviewed leitner--session)))
@@ -1022,7 +1076,11 @@ and rate your recall when done"
        (propertize (format " LEITNER  %d/%d " (1+ reviewed) total)
                    'face '(:weight bold))
        (propertize (format "  %s" gname) 'face 'mode-line)
-       (propertize (format "  Box %d " box) 'face '(:slant italic))
+       (propertize (format "  Box %d%s " box
+                           (if leitner-sm2-hybrid
+                               (format "  EF %.2f" (leitner--item-ease leitner--review-item))
+                             ""))
+                   'face '(:slant italic))
        (propertize "    C-c l g Good   C-c l b Bad   C-c l s Skip   C-c l q Quit"
                    'face '(:inherit shadow))))))
 
@@ -1072,9 +1130,7 @@ and rate your recall when done"
       (leitner-review-minor-mode -1))
     (setq leitner--session nil)
     (leitner-save)
-    (message "Leitner: session ended.  Index saved.")
-    
-    (run-hooks 'leitner-after-session-hook)))
+    (message "Leitner: session ended.  Index saved.")))
 
 (defun leitner-review-help ()
   "Echo review keybindings in minibuffer."
@@ -1263,13 +1319,24 @@ and rate your recall when done"
 
 (define-derived-mode leitner-group-view-mode tabulated-list-mode "Leitner-Group"
   "Detail view for one Leitner group: all files and their review status."
-  (setq tabulated-list-format
-        [("File"          36 t)
-         ("Box"            5 t)
-         ("Last Reviewed" 14 t)
-         ("Due in"        10 nil)
-         ("Due?"           5 nil)])
+  (setq tabulated-list-format (leitner--gv-column-format))
   (tabulated-list-init-header))
+
+(defun leitner--gv-column-format ()
+  "Return the column format vector for the group detail view.
+Appends an Ease column when `leitner-sm2-hybrid' is non-nil."
+  (if leitner-sm2-hybrid
+      [("File"          34 t)
+       ("Box"            5 t)
+       ("Last Reviewed" 14 t)
+       ("Due in"         8 nil)
+       ("Due?"           5 nil)
+       ("Ease"           6 nil)]
+    [("File"          36 t)
+     ("Box"            5 t)
+     ("Last Reviewed" 14 t)
+     ("Due in"        10 nil)
+     ("Due?"           5 nil)]))
 
 (defun leitner--gv-build-header (group-name)
   "Build the header-line string for the GROUP-NAME detail view."
@@ -1284,7 +1351,9 @@ and rate your recall when done"
      'face 'mode-line)))
 
 (defun leitner--gv-entries (group-name)
-  "Build tabulated-list entries for GROUP-NAME in group view."
+  "Build tabulated-list entries for GROUP-NAME in group view.
+When `leitner-sm2-hybrid' is non-nil, each row includes the item's
+ease factor so users can see how adaptive scheduling is tracking."
   (mapcar
    (lambda (item)
      (let* ((path  (cdr (assq :path item)))
@@ -1301,15 +1370,26 @@ and rate your recall when done"
             (status
              (cond (grad   (propertize "Grad" 'face 'success))
                    (due-p  (propertize "Yes"  'face 'warning))
-                   (t      ""))))
-       (list path
+                   (t      "")))
+            (base-vec
              (vector
               (file-name-nondirectory path)
               (if grad (propertize (number-to-string box) 'face 'shadow)
                 (number-to-string box))
               (leitner--format-ts lr)
               due-str
-              status))))
+              status)))
+       (list path
+             (if leitner-sm2-hybrid
+                 (let* ((ef  (leitner--item-ease item))
+                        (ef-str (format "%.2f" ef))
+                        ;; colour-code: green above default, orange below
+                        (ef-face (cond ((>= ef leitner-sm2-default-ef) 'success)
+                                       ((< ef (+ leitner-sm2-min-ef 0.2)) 'error)
+                                       (t 'warning))))
+                   (vconcat base-vec
+                            (vector (propertize ef-str 'face ef-face))))
+               base-vec))))
    (leitner--group-items group-name)))
 
 ;;;###autoload
@@ -1321,11 +1401,17 @@ and rate your recall when done"
   (let ((buf (get-buffer-create (format "*Leitner: %s*" group-name))))
     (with-current-buffer buf
       (leitner-group-view-mode)
+      ;; rebuild column format here too in case leitner-sm2-hybrid was toggled
+      ;; after the mode was first defined or a previous buffer was reused
+      (setq tabulated-list-format (leitner--gv-column-format))
+      (tabulated-list-init-header)
       (setq leitner--gv-group      group-name
             header-line-format     (leitner--gv-build-header group-name)
             tabulated-list-entries (lambda () (leitner--gv-entries group-name)))
       (setq-local revert-buffer-function
                   (lambda (_a _n)
+                    (setq tabulated-list-format (leitner--gv-column-format))
+                    (tabulated-list-init-header)
                     (setq header-line-format
                           (leitner--gv-build-header group-name))
                     (tabulated-list-print t)))

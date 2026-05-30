@@ -98,7 +98,9 @@ Files you consistently recall well gradually stretch further apart. Files you st
 (setq leitner-sm2-hybrid t)
 #+END_SRC
 
-That's it. Enabling it midway through your workflow is safe. All files in the group start with an ease factor of =1.0=, so their intervals are completely unchanged on day one. The EF only begins drifting from actual review behaviour going forward, so that sm-2 doesn't completely take over.
+That's it.
+
+Enabling it midway through your workflow is safe. All files in the group start with an ease factor of =1.0=, so their intervals are completely unchanged on day one. The EF only begins drifting from actual review behaviour going forward, so that sm-2 doesn't completely take over.
 
 *** How the ease factor works
 
@@ -127,6 +129,7 @@ All SM-2 hybrid parameters are individually tunable to your liking:
 
 
 ** Changelog
+- /v0.3.0:/ sm-2 algorithm implementation through =leitner-sm2-hybrid=. Applies an ease factor to each box + item.
 - /v0.2.3:/ Batch-add multiple files to group through dired mode + automation hooks for extensibility
 - /v0.2.2:/ Rename groups + Healthcheck to resolve rename/delete/moved files in a group
 - /v0.2.1:/ Random box shuffling & optional question prompts for review
