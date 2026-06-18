@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.2.4
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -52,18 +52,29 @@
 ;;   SM-2 HYBRID MODE (optional)
 ;;
 ;;   set `leitner-sm2-hybrid' to enable adaptive sm-2 based interval scaling
-;;   Each item grows a personal ease factor (EF) that multiplies its box
+;;   globally, or use `e' on the dashboard to enable it per group.
+;;   Each item grows a personal ease factor (EF) that scales its box
 ;;   interval.  The Leitner box structure is still fully preserved only the
 ;;   spacing between reviews adapts to how well you know each individual file
 ;;
-;;     (setq leitner-sm2-hybrid t)
+;;     (setq leitner-sm2-hybrid t)   ; global
+;;     e  (dashboard)                ; per group
 ;;
-;;   The EF starts at `leitner-sm2-default-ef' (1.0) on purpose and is
-;;   adjusted on every rating:
+;;   The EF starts at `leitner-sm2-default-ef' (1.0) and adjusts on rating:
 ;;     Good   +`leitner-sm2-good-bonus'   (default +0.10)
 ;;     Hard   -`leitner-sm2-hard-penalty' (default -0.15)
 ;;     Reset  -`leitner-sm2-reset-penalty'(default -0.20)
 ;;   Clamped to [`leitner-sm2-min-ef', `leitner-sm2-max-ef'] (1.3 -- 4.0).
+;;
+;;   EF TAPERING
+;;   in upper boxes the Leitner interval already encodes mastery, so the EF
+;;   is tapered out to avoid compounding.  The effective interval
+;;   formula is:
+;;     effective = base × (1 + (EF - 1) × taper_weight)
+;;   where taper_weight is 1.0 below `leitner-sm2-taper-start' (default Box 3)
+;;   and 0.0 at `leitner-sm2-taper-end' (default last box), with linear
+;;   interpolation between them.  In the top box the EF is a no-op and the
+;;   standard Leitner interval is used exactly.
 ;;
 ;;   PROMPTS / QUESTIONS
 ;;
@@ -80,6 +91,7 @@
 ;;   a     Add a file (defaults to current buffer)
 ;;   A     Create a new empty group
 ;;   d     Delete the group under point
+;;   e     Toggle SM-2 adaptive scheduling for the group under point
 ;;   s     Start a session across ALL groups
 ;;   S     Save the index manually
 ;;   g     Refresh
@@ -90,6 +102,7 @@
 ;;   r     Reset that file to Box 1
 ;;   d     Remove that file from the index
 ;;   a     Add a file to this group
+;;   E     Reset the ease factor for the file under point (SM-2 hybrid)
 ;;   q     Close
 ;;
 ;;; Code:
@@ -102,7 +115,6 @@
 
 ;; ===========================================================================
 ;;  Customisation
-;; ===========================================================================
 
 (defgroup leitner nil
   "Leitner spaced repetition for note files."
@@ -131,15 +143,14 @@ Index 0 = Box 1 (reviewed most frequently)."
 ;; ===========================================================================
 ;;  SM-2 Hybrid Mode Customisation
 ;;
-;; when `leitner-sm2-hybrid' is enabled the pure Leitner box ladder is kept
-;; intact (advancement, demotion, and graduation rules dont change), but each
-;; item carries a personal *ease factor* (EF) that scales the box interval
-;;
-;;   effective_interval = box_interval × ease_factor
-;;
-;; The EF starts at `leitner-sm2-default-ef' which is 1.0, drifts up on Good reviews
-;; and drifts down on Bad/Reset reviews, giving easy material longer breathing room
-;; and keeping hard material tighter all without touching the box structure.
+;; SM-2 mode can be enabled globally via `leitner-sm2-hybrid' or per-group
+;; via the dashboard `e' key (stored in each group's :sm2 flag in the JSON
+;; index).  All scheduling code resolves the active mode through `leitner--sm2-active-p'
+;; The dynamic variable `leitner--active-group' is bound at every scheduling
+;; entry point so the resolver can inspect the correct group without requiring
+;; a group parameter to be threaded through inner functions
+;; The taper boundaries are controlled by `leitner-sm2-taper-start' and
+;; `leitner-sm2-taper-end'
 
 (defcustom leitner-sm2-hybrid nil
   "Enable the SM-2 ease-factor hybrid scheduling mode.
@@ -147,7 +158,7 @@ each item carries a personal ease factor (EF) that multiplies its box interval."
   :type 'boolean
   :group 'leitner)
 
-;; the classic SM-2 default is 2.5, but here its 1.0
+;; SM-2 default is 2.5, but here its 1.0
 ;; to allow dynamic switching between leitner and sm-2
 ;; without inflating the due dates, instead they stretch
 ;; from where they are
@@ -184,9 +195,24 @@ Prevents intervals completely taking off on very easy material."
   :type 'number
   :group 'leitner)
 
+(defcustom leitner-sm2-taper-start 3
+  "Box number at which EF influence begins to decline.
+At boxes 1 through this value the full ease factor is applied.
+Set to 1 to begin tapering from the very first box, set equal to
+`leitner-sm2-taper-end' (or the number of boxes) to disable tapering."
+  :type 'integer
+  :group 'leitner)
+
+(defcustom leitner-sm2-taper-end nil
+  "Box number at which EF influence reaches zero.
+Nil (the default) means the last configured Leitner box.
+Must be greater than `leitner-sm2-taper-start'."
+  :type '(choice (const :tag "Last box" nil) integer)
+  :group 'leitner)
+
 
 ;; hooks
-;; use with olivetti, writeroom in org-mode reviews
+;; such as with olivetti, writeroom in org-mode reviews
 
 (defcustom leitner-before-review-hook nil
   "Hook run right after a note file is revealed in a review session.")
@@ -227,10 +253,14 @@ Prevents intervals completely taking off on very easy material."
 (defvar leitner--session nil
   "Active review session state, or nil when idle.")
 
+(defvar leitner--active-group nil
+  "Dynamically bound group name for SM-2 scheduling resolution.
+`leitner--sm2-active-p' can resolve the correct mode without
+requiring a `group-name' argument to be threaded through inner functions.")
+
 
 ;; ===========================================================================
 ;;  Small Utilities
-;; ===========================================================================
 
 (defun leitner--now ()
   "Return the current time as a Unix timestamp (integer)."
@@ -248,22 +278,78 @@ Prevents intervals completely taking off on very easy material."
   "Review interval in seconds for BOX (1-indexed)."
   (* (leitner--box-days box) 86400))
 
+
+;; ---------------------------------------------------------------------------
+;;  SM-2 resolution helpers
+;;
+;;  All scheduling code resolves SM-2 mode through `leitner--sm2-active-p'
+;;  rather than reading `leitner-sm2-hybrid' directly.  This allows the
+;;  global flag and per-group flags to coexist: SM-2 is active for an item
+;;  when either is set.
+;;  `leitner--active-group' is bound at every entry point (session record,
+;;  front card show, group-view render) so the inner functions see the right
+;;  group without needing a signature change.
+
+(defun leitner--sm2-active-p (&optional group-name)
+  "Return non-nil when SM-2 hybrid mode is active for GROUP-NAME.
+Checks the global flag first, then the per-group flag stored in the index."
+  (or leitner-sm2-hybrid
+      (when group-name
+        (cdr (assq :sm2 (leitner--get-group group-name))))))
+
+(defun leitner--group-sm2-flag (group-name)
+  "Return the per-group SM-2 flag for GROUP-NAME (t or nil)."
+  (cdr (assq :sm2 (leitner--get-group group-name))))
+
+(defun leitner--set-group-sm2-flag (group-name flag)
+  "Set the per-group SM-2 toggle for GROUP-NAME to FLAG."
+  (let ((g (gethash group-name (leitner--groups-ht))))
+    (when g
+      (let ((cell (assq :sm2 g)))
+        (if cell
+            (setcdr cell flag)
+          ;; group predates :sm2 support — append the key
+          (nconc g (list (cons :sm2 flag))))))))
+
+
+;; Weight is 1.0 at BOX <= `leitner-sm2-taper-start' and 0.0 at BOX >=
+;; `leitner-sm2-taper-end' (default: last box)
+(defun leitner--sm2-taper-weight (box)
+  "Return the EF taper weight [0.0, 1.0] for BOX (1-indexed).
+This ensures that in low boxes the ease factor has full influence while
+in high boxes the standard Leitner interval is used unchanged, the box
+ladder already encodes mastery at that level."
+  (let* ((start (or leitner-sm2-taper-start 3))
+         (end   (or leitner-sm2-taper-end (leitner--num-boxes))))
+    (cond
+     ((<= box start) 1.0)
+     ((>= box end)   0.0)
+     (t (/ (float (- end box))
+           (float (- end start)))))))
+
+
 (defun leitner--item-ease (item)
-  "Return the effective ease factor for each ITEM.
-When SM-2 hybrid is off this always returns 1.0 (no scaling).
-When it is on, return the stored :ease value"
-  (if (not leitner-sm2-hybrid)
+  "Return the ease factor for ITEM.
+When SM-2 is inactive (resolved via `leitner--active-group') returns 1.0.
+Otherwise returns the stored :ease value, falling back to
+`leitner-sm2-default-ef' for items that predate hybrid mode."
+  (if (not (leitner--sm2-active-p leitner--active-group))
       1.0
     (let ((ef (cdr (assq :ease item))))
       (if (and ef (numberp ef)) ef leitner-sm2-default-ef))))
 
 (defun leitner--item-interval-secs (item)
   "Effective review interval in seconds for ITEM.
-In standard mode this equals `leitner--box-secs' for the item's box.
-In SM-2 hybrid mode the box interval is multiplied by the item's ease factor."
-  (let ((base (leitner--box-secs (cdr (assq :box item)))))
-    (if leitner-sm2-hybrid
-        (round (* base (leitner--item-ease item)))
+In standard Leitner mode this equals the box interval exactly.
+At weight 1.0 (low boxes) this is full EF scaling.
+At weight 0.0 (top boxes) the box interval is returned unchanged."
+  (let* ((box  (cdr (assq :box item)))
+         (base (leitner--box-secs box)))
+    (if (leitner--sm2-active-p leitner--active-group)
+        (let* ((ef     (leitner--item-ease item))
+               (weight (leitner--sm2-taper-weight box))
+               (scale  (+ 1.0 (* (- ef 1.0) weight))))
+          (round (* base scale)))
       base)))
 
 (defun leitner--item-due-p (item)
@@ -316,7 +402,7 @@ The EF is clamped between `leitner-sm2-min-ef' & `leitner-sm2-max-ef'."
                     ('skip old-box)))
          ;; SM-2 hybrid: update ease factor
          (old-ef (leitner--item-ease item))
-         (new-ef (if leitner-sm2-hybrid
+         (new-ef (if (leitner--sm2-active-p leitner--active-group)
                      (let ((raw (pcase outcome
                                   ('good  (+ old-ef leitner-sm2-good-bonus))
                                   ('hard  (- old-ef leitner-sm2-hard-penalty))
@@ -324,8 +410,8 @@ The EF is clamped between `leitner-sm2-min-ef' & `leitner-sm2-max-ef'."
                                   ('skip  old-ef))))
                        (max leitner-sm2-min-ef
                             (min leitner-sm2-max-ef raw)))
-                   ;; not in hybrid mode so preserve whatever EF was stored so
-                   ;; enabling hybrid later picks it up correctly
+                   ;; SM-2 inactive: preserve stored EF so toggling on later
+                   ;; picks up the existing value correctly
                    old-ef)))
     (list (cons :path          (cdr (assq :path item)))
           (cons :box           new-box)
@@ -423,7 +509,7 @@ case-insensitively, so Denote's lowercase #+title: is handled correctly)"
 (defun leitner--get-or-create-group (name)
   "Return the group alist for NAME, creating it if it does not exist."
   (or (leitner--get-group name)
-      (let ((g (list (cons :name name) (cons :items nil))))
+      (let ((g (list (cons :name name) (cons :sm2 nil) (cons :items nil))))
         (puthash name g (leitner--groups-ht))
         g)))
 
@@ -472,11 +558,14 @@ case-insensitively, so Denote's lowercase #+title: is handled correctly)"
     result))
 
 (defun leitner--due-pairs (&optional group-name)
-  "Due (group-name . item-alist) pairs, optionally filtered to GROUP-NAME."
+  "Due (group-name . item-alist) pairs, optionally filtered to GROUP-NAME.
+Binds `leitner--active-group' per pair so the SM-2 resolver sees the
+correct group for per-group SM-2 mode."
   (seq-filter
    (lambda (pair)
      (and (or (null group-name) (equal (car pair) group-name))
-          (leitner--item-due-p (cdr pair))))
+          (let ((leitner--active-group (car pair)))
+            (leitner--item-due-p (cdr pair)))))
    (leitner--all-pairs)))
 
 (defun leitner--group-next-due-str (active)
@@ -508,8 +597,7 @@ ACTIVE is any non-graduated items for a group."
 
 ;; =========================================================================
 ;;  Persistence
-;; =========================================================================
-
+;;
 ;; use json-key-type 'string when reading so that JSON object keys
 ;; come back as plain strings
 ;; on the write side, json-encode calls symbol-name on symbol keys, so
@@ -538,6 +626,7 @@ ACTIVE is any non-graduated items for a group."
                  items))))
              ;; gname is a string; json-encode-key handles strings directly.
              (push (cons gname (list (cons 'name  gname)
+                                     (cons 'sm2   (if (cdr (assq :sm2 g)) t :json-false))
                                      (cons 'items encoded-items)))
                    groups-list)))
      (leitner--groups-ht))
@@ -575,9 +664,12 @@ ACTIVE is any non-graduated items for a group."
                                                   ease
                                                 leitner-sm2-default-ef)))))
                items-list)))
-        (puthash gname
-                 (list (cons :name gname) (cons :items items))
-                 ht)))
+        (let ((sm2-val (cdr (assoc "sm2" gdata))))
+          (puthash gname
+                   (list (cons :name  gname)
+                         (cons :sm2   (and sm2-val (not (eq sm2-val :json-false))))
+                         (cons :items items))
+                   ht))))
     (list (cons :groups ht) (cons :dirty nil))))
 
 ;;;###autoload
@@ -773,6 +865,35 @@ to a single group in one go, folders and already-registered files are skipped."
     (leitner--maybe-refresh-dashboard)))
 
 ;;;###autoload
+(defun leitner-reset-ease (&optional path)
+  "Reset ease factor of PATH to `leitner-sm2-default-ef' without touching its box.
+When called interactively without a path, defaults to the current buffer's file.
+Useful when an item has drifted to an extreme ease value and you want to
+recalibrate it without losing its position on the box ladder."
+  (interactive)
+  (leitner--ensure-data)
+  (let* ((abs (expand-file-name
+               (or path
+                   (buffer-file-name)
+                   (read-file-name "File to reset ease: "))))
+         (pair (seq-find (lambda (p)
+                           (equal (cdr (assq :path (cdr p))) abs))
+                         (leitner--all-pairs))))
+    (if (not pair)
+        (message "Leitner: '%s' is not tracked in the index."
+                 (file-name-nondirectory abs))
+      (let* ((gname    (car pair))
+             (item     (cdr pair))
+             (new-item (copy-sequence item)))
+        (setcdr (assq :ease new-item) leitner-sm2-default-ef)
+        (leitner--replace-item gname abs new-item)
+        (leitner--mark-dirty)
+        (leitner-save)
+        (message "Leitner: ease factor for '%s' reset to %.2f."
+                 (file-name-nondirectory abs)
+                 leitner-sm2-default-ef)))))
+
+;;;###autoload
 (defun leitner-add-group (name)
   "Create a new empty group called NAME."
   (interactive "sNew group name: ")
@@ -787,8 +908,7 @@ to a single group in one go, folders and already-registered files are skipped."
 
 ;; ===========================================================================
 ;;  Review Session
-;; ===========================================================================
-
+;;
 ;; REVIEW ORDER: The due list is first shuffled randomly by `leitner--shuffle',
 ;; then stable sorted by box number. This groups items by box number while
 ;; randomising the order within each box
@@ -851,6 +971,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
          (gname    (car pair))
          (item     (cdr pair))
          (path     (cdr (assq :path item)))
+         (leitner--active-group gname)
          (new-item (leitner--item-rate item outcome)))
     (leitner--replace-item gname path new-item)
     (cl-incf (cdr (assq :reviewed leitner--session)))
@@ -868,7 +989,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
                                     (propertize "Already in Box 1" 'face 'warning)
                                   (format "Down -> Box %d" (cdr (assq :box new-item)))))
                      ('skip "Skipped")))
-           (ef-suffix (if (and leitner-sm2-hybrid (not (eq outcome 'skip)))
+           (ef-suffix (if (and (leitner--sm2-active-p gname) (not (eq outcome 'skip)))
                           (format "  [EF %.2f]" (leitner--item-ease new-item))
                         "")))
       (message "Leitner: %s%s  (%d / %d done)"
@@ -890,7 +1011,6 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
 
 ;; =========================================================================
 ;;  Front Card: recall before reveal
-;; =========================================================================
 
 (defconst leitner--front-buf "*Leitner: Review*"
   "Name of the front-card buffer shown before revealing the file.")
@@ -913,7 +1033,8 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
 
 (defun leitner--show-front-card (pair)
   "Display the front card for PAIR (group-name . item-alist)."
-  (let* ((gname    (car pair))
+  (let* ((leitner--active-group (car pair))
+         (gname    (car pair))
          (item     (cdr pair))
          (path     (cdr (assq :path item)))
          (box      (cdr (assq :box  item)))
@@ -952,10 +1073,11 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
           (insert (format "  Box:            %d  (every %d day%s%s)\n"
                           box interval
                           (if (= interval 1) "" "s")
-                          (if leitner-sm2-hybrid
-                              (let* ((ef  (leitner--item-ease item))
-                                     (eff (round (* interval ef))))
-                                (format "  |  EF %.2f  ->  ~%dd effective" ef eff))
+                          (if (leitner--sm2-active-p gname)
+                              (let* ((ef   (leitner--item-ease item))
+                                     (eff  (/ (leitner--item-interval-secs item)
+                                              86400.0)))
+                                (format "  |  EF %.2f  ->  ~%.0fd effective" ef eff))
                             "")))
           (insert (format "  Last reviewed:  %s\n"
                           (leitner--format-ts lr)))
@@ -1007,7 +1129,9 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
          (gname (car pair))
          (item  (cdr pair))
          (path  (cdr (assq :path item))))
-    (leitner--replace-item gname path (leitner--item-rate item 'skip))
+    (leitner--replace-item gname path
+                           (let ((leitner--active-group gname))
+                             (leitner--item-rate item 'skip)))
     (cl-incf (cdr (assq :reviewed leitner--session)))
     (setcdr (assq :queue leitner--session) (cdr queue))
     (message "Leitner: skipped '%s'." (file-name-nondirectory path))
@@ -1030,7 +1154,6 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
 
 ;; =========================================================================
 ;;  Review Minor Mode: rating from within the note file
-;; =========================================================================
 
 (defvar-local leitner--review-item  nil "Item under review (buffer-local).")
 (defvar-local leitner--review-group nil "Group of the item under review (buffer-local).")
@@ -1077,8 +1200,9 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
                    'face '(:weight bold))
        (propertize (format "  %s" gname) 'face 'mode-line)
        (propertize (format "  Box %d%s " box
-                           (if leitner-sm2-hybrid
-                               (format "  EF %.2f" (leitner--item-ease leitner--review-item))
+                           (if (leitner--sm2-active-p leitner--review-group)
+                               (let ((leitner--active-group leitner--review-group))
+                                 (format "  EF %.2f" (leitner--item-ease leitner--review-item)))
                              ""))
                    'face '(:slant italic))
        (propertize "    C-c l g Good   C-c l b Bad   C-c l s Skip   C-c l q Quit"
@@ -1138,8 +1262,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
   (message "Leitner: C-c l g Good   C-c l b Bad (prompts)   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
 
 ;; =========================================================================
-;;  Dashboard: the main entry point showing each group
-;; =========================================================================
+;;  Dashboard, main entry point showing each group
 
 (defvar leitner-menu-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1149,6 +1272,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
     (define-key map (kbd "a")   #'leitner-add-file)
     (define-key map (kbd "A")   #'leitner-add-group)
     (define-key map (kbd "d")   #'leitner-menu-delete-group)
+    (define-key map (kbd "e")   #'leitner-menu-toggle-sm2)
     (define-key map (kbd "R")   #'leitner-menu-rename-group)
     (define-key map (kbd "s")   #'leitner-start-session)      ; review ALL groups
     (define-key map (kbd "S")   #'leitner-save)
@@ -1160,7 +1284,8 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
 (defun leitner--menu-format ()
   "Build the tabulated-list column format from `leitner-box-intervals'."
   (vconcat
-   (list (list "Group"  26 t)
+   (list (list "Group"  22 t)
+         (list "SM2"     4 nil)
          (list "Files"   7 t)
          (list "Due"     5 t)
          (list "Next"    6 t))
@@ -1190,19 +1315,22 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
   (let ((nb (leitner--num-boxes)))
     (mapcar
      (lambda (gname)
-       (let* ((items  (leitner--group-items gname))
+       (let* ((leitner--active-group gname)
+              (items  (leitner--group-items gname))
               (n      (length items))
               (active (seq-filter (lambda (it) (not (leitner--item-graduated-p it))) items))
               (due    (length (seq-filter #'leitner--item-due-p active)))
-              (next  (leitner--group-next-due-str active))
+              (next   (leitner--group-next-due-str active))
               (grad   (- n (length active)))
-              (boxes  (make-vector nb 0)))
+              (boxes  (make-vector nb 0))
+              (sm2-p  (leitner--sm2-active-p gname)))
          (dolist (item active)
            (let ((b (1- (min nb (cdr (assq :box item))))))
              (aset boxes b (1+ (aref boxes b)))))
          (list gname
                (vconcat
                 (list gname
+                      (if sm2-p (propertize "on" 'face 'font-lock-keyword-face) "")
                       (number-to-string n)
                       (if (> due 0)
                           (propertize (number-to-string due) 'face 'warning)
@@ -1284,11 +1412,29 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
           (tabulated-list-print t)
           (message "Leitner: group renamed to '%s'." new-name)))))))
 
+(defun leitner-menu-toggle-sm2 ()
+  "Toggle per-group SM-2 adaptive scheduling for the group under point.
+Independent of the global `leitner-sm2-hybrid' setting: SM-2 is active
+for a group when either this flag or the global flag is set."
+  (interactive)
+  (let ((gname (tabulated-list-get-id)))
+    (when gname
+      (let ((new-val (not (leitner--group-sm2-flag gname))))
+        (leitner--set-group-sm2-flag gname new-val)
+        (leitner--mark-dirty)
+        (leitner-save)
+        (tabulated-list-print t)
+        (message "Leitner: SM-2 %s for group '%s'%s."
+                 (if new-val "enabled" "disabled")
+                 gname
+                 (if (and new-val leitner-sm2-hybrid)
+                     " (also enabled globally)" ""))))))
+
 (defun leitner-menu-help ()
   "Echo dashboard keybindings to minibuffer."
   (interactive)
   (message
-   "Leitner: RET view  r review  s review-all  a add-file  A new-group  R rename  d delete  S save  g refresh"))
+   "Leitner: RET view  r review  e SM2-toggle  s review-all  a add-file  A new-group  R rename  d delete  S save  g refresh"))
 
 (defun leitner--maybe-refresh-dashboard ()
   "Silently refresh the dashboard buffer if it is alive."
@@ -1300,7 +1446,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
 
 ;; =========================================================================
 ;;  Group Detail View  (file list + status for one group)
-;; =========================================================================
+;;
 ;; detail view for the current group, shows the file list with scheduling info
 
 (defvar leitner-group-view-mode-map
@@ -1310,6 +1456,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
     (define-key map (kbd "r")   #'leitner-gv-reset-file)
     (define-key map (kbd "d")   #'leitner-gv-remove-file)
     (define-key map (kbd "a")   #'leitner-gv-add-file)
+    (define-key map (kbd "E")   #'leitner-gv-reset-ease)
     (define-key map (kbd "q")   #'quit-window)
     (define-key map (kbd "?")   #'leitner-gv-help)
     map)
@@ -1324,8 +1471,8 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
 
 (defun leitner--gv-column-format ()
   "Return the column format vector for the group detail view.
-Appends an Ease column when `leitner-sm2-hybrid' is non-nil."
-  (if leitner-sm2-hybrid
+Appends an Ease column when SM-2 is active for the current group."
+  (if (leitner--sm2-active-p leitner--gv-group)
       [("File"          34 t)
        ("Box"            5 t)
        ("Last Reviewed" 14 t)
@@ -1344,53 +1491,57 @@ Appends an Ease column when `leitner-sm2-hybrid' is non-nil."
          (n      (length items))
          (grad   (length (seq-filter #'leitner--item-graduated-p items)))
          (active (- n grad))
-         (due    (length (seq-filter #'leitner--item-due-p items))))
+         (due    (length (seq-filter #'leitner--item-due-p items)))
+         (sm2-p  (leitner--sm2-active-p group-name)))
     (propertize
-     (format "  %s   |   %d active  %d graduated   |   %d due   |   RET open  r reset/reactivate  d remove  a add  q close"
-             group-name active grad due)
+     (format "  %s%s   |   %d active  %d graduated   |   %d due   |   RET open  r reset  E reset-ease  d remove  a add  q close"
+             group-name
+             (if sm2-p " [sm2]" "")
+             active grad due)
      'face 'mode-line)))
 
 (defun leitner--gv-entries (group-name)
   "Build tabulated-list entries for GROUP-NAME in group view.
-When `leitner-sm2-hybrid' is non-nil, each row includes the item's
+When SM-2 is active for this group, each row includes the item's
 ease factor so users can see how adaptive scheduling is tracking."
-  (mapcar
-   (lambda (item)
-     (let* ((path  (cdr (assq :path item)))
-            (box   (cdr (assq :box  item)))
-            (lr    (cdr (assq :last-reviewed item)))
-            (grad  (cdr (assq :graduated item)))
-            (due-p (leitner--item-due-p item))
-            (days  (leitner--item-days-until-due item))
-            (due-str
-             (cond (grad       (propertize "—"       'face 'shadow))
-                   ((= lr 0)   (propertize "new"     'face 'warning))
-                   (due-p      (propertize "overdue" 'face 'warning))
-                   (t          (format "%.0fd" days))))
-            (status
-             (cond (grad   (propertize "Grad" 'face 'success))
-                   (due-p  (propertize "Yes"  'face 'warning))
-                   (t      "")))
-            (base-vec
-             (vector
-              (file-name-nondirectory path)
-              (if grad (propertize (number-to-string box) 'face 'shadow)
-                (number-to-string box))
-              (leitner--format-ts lr)
-              due-str
-              status)))
-       (list path
-             (if leitner-sm2-hybrid
-                 (let* ((ef  (leitner--item-ease item))
-                        (ef-str (format "%.2f" ef))
-                        ;; colour-code: green above default, orange below
-                        (ef-face (cond ((>= ef leitner-sm2-default-ef) 'success)
-                                       ((< ef (+ leitner-sm2-min-ef 0.2)) 'error)
-                                       (t 'warning))))
-                   (vconcat base-vec
-                            (vector (propertize ef-str 'face ef-face))))
-               base-vec))))
-   (leitner--group-items group-name)))
+  (let ((leitner--active-group group-name))
+    (mapcar
+     (lambda (item)
+       (let* ((path  (cdr (assq :path item)))
+              (box   (cdr (assq :box  item)))
+              (lr    (cdr (assq :last-reviewed item)))
+              (grad  (cdr (assq :graduated item)))
+              (due-p (leitner--item-due-p item))
+              (days  (leitner--item-days-until-due item))
+              (due-str
+               (cond (grad       (propertize "—"       'face 'shadow))
+                     ((= lr 0)   (propertize "new"     'face 'warning))
+                     (due-p      (propertize "overdue" 'face 'warning))
+                     (t          (format "%.0fd" days))))
+              (status
+               (cond (grad   (propertize "Grad" 'face 'success))
+                     (due-p  (propertize "Yes"  'face 'warning))
+                     (t      "")))
+              (base-vec
+               (vector
+                (file-name-nondirectory path)
+                (if grad (propertize (number-to-string box) 'face 'shadow)
+                  (number-to-string box))
+                (leitner--format-ts lr)
+                due-str
+                status)))
+         (list path
+               (if (leitner--sm2-active-p group-name)
+                   (let* ((ef  (leitner--item-ease item))
+                          (ef-str (format "%.2f" ef))
+                          ;; colour-code: green above default, orange below
+                          (ef-face (cond ((>= ef leitner-sm2-default-ef) 'success)
+                                         ((< ef (+ leitner-sm2-min-ef 0.2)) 'error)
+                                         (t 'warning))))
+                     (vconcat base-vec
+                              (vector (propertize ef-str 'face ef-face))))
+                 base-vec))))
+     (leitner--group-items group-name))))
 
 ;;;###autoload
 (defun leitner-view-group (group-name)
@@ -1458,7 +1609,8 @@ ease factor so users can see how adaptive scheduling is tracking."
                           "Reset '%s' to Box 1? ")
                         (file-name-nondirectory path))))
       ;; leitner--item-rate 'bad clears :graduated as well and sets it to nil
-      (leitner--replace-item gname path (leitner--item-rate item 'bad))
+      (let ((leitner--active-group gname))
+        (leitner--replace-item gname path (leitner--item-rate item 'bad)))
       (leitner--mark-dirty)
       (leitner-save)
       (setq header-line-format (leitner--gv-build-header gname))
@@ -1474,15 +1626,39 @@ ease factor so users can see how adaptive scheduling is tracking."
   (setq header-line-format (leitner--gv-build-header leitner--gv-group))
   (tabulated-list-print t))
 
+(defun leitner-gv-reset-ease ()
+  "Reset the ease factor for the file on the current group-view line.
+Restores the items ease to `leitner-sm2-default-ef' without touching
+its box or review history.  Only effective when SM-2 is active."
+  (interactive)
+  (let* ((path  (tabulated-list-get-id))
+         (gname leitner--gv-group)
+         (leitner--active-group gname)
+         (item  (seq-find (lambda (it)
+                            (equal (cdr (assq :path it)) path))
+                          (leitner--group-items gname))))
+    (unless path  (user-error "Leitner: no file on current line"))
+    (unless item  (user-error "Leitner: item not found"))
+    (unless (leitner--sm2-active-p gname)
+      (user-error "Leitner: SM-2 is not active for group '%s'" gname))
+    (let ((new-item (copy-sequence item)))
+      (setcdr (assq :ease new-item) leitner-sm2-default-ef)
+      (leitner--replace-item gname path new-item)
+      (leitner--mark-dirty)
+      (leitner-save)
+      (tabulated-list-print t)
+      (message "Leitner: ease reset to %.2f for '%s'."
+               leitner-sm2-default-ef
+               (file-name-nondirectory path)))))
+
 (defun leitner-gv-help ()
   "Echo group-detail keybindings."
   (interactive)
-  (message "Leitner group: RET open   r reset   d remove   a add   q close"))
+  (message "Leitner group: RET open   r reset   E reset-ease   d remove   a add   q close"))
 
 
 ;; =========================================================================
 ;;  Evil-mode Compatibility
-;; =========================================================================
 ;;
 ;; keys `g', `?', `s', `a', `d', `A', `S' are intercepted by evil
 ;; `evil-set-initial-state' MODE 'emacs' tells evil to leave the buffer alone

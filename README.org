@@ -129,7 +129,7 @@ All SM-2 hybrid parameters are individually tunable to your liking:
 
 
 ** Changelog
-- /v0.3.0:/ sm-2 algorithm implementation through =leitner-sm2-hybrid=. Applies an ease factor to each box + item.
+- /v0.3.0:/ sm-2 implementation through =leitner-sm2-hybrid=. Applies an ease factor to each box + item.
 - /v0.2.3:/ Batch-add multiple files to group through dired mode + automation hooks for extensibility
 - /v0.2.2:/ Rename groups + Healthcheck to resolve rename/delete/moved files in a group
 - /v0.2.1:/ Random box shuffling & optional question prompts for review
