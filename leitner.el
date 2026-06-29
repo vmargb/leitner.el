@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.3.0
+;; Version: 0.3.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -17,10 +17,11 @@
 ;;
 ;; ~~ Quick Start ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ;;
-;;   M-x leitner               Open the group dashboard
-;;   M-x leitner-add-group     Add new group to add files to
-;;   M-x leitner-add-file      Add current buffer's file to a group
-;;   M-x leitner-start-session Review all due files (or C-u for one group)
+;;   M-x leitner                  Open the group dashboard
+;;   M-x leitner-add-group        Add new group to add files to
+;;   M-x leitner-add-file         Add current buffer's file to a group
+;;   M-x leitner-start-session    Review all due files (or C-u for one group)
+;;   M-x leitner-review-graduated Browse graduated files (or C-u for one group)
 ;;
 ;; ~~ REVIEW WORKFLOW ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ;;
@@ -64,7 +65,7 @@
 ;;     Good   +`leitner-sm2-good-bonus'   (default +0.10)
 ;;     Hard   -`leitner-sm2-hard-penalty' (default -0.15)
 ;;     Reset  -`leitner-sm2-reset-penalty'(default -0.20)
-;;   Clamped to [`leitner-sm2-min-ef', `leitner-sm2-max-ef'] (1.3 -- 4.0).
+;;   Clamped to [`leitner-sm2-min-ef', `leitner-sm2-max-ef'] (0.5 -- 2.0)
 ;;
 ;;   EF TAPERING
 ;;   in upper boxes the Leitner interval already encodes mastery, so the EF
@@ -84,6 +85,13 @@
 ;;
 ;;   if no #+LEITNER_PROMPT: is found, leitner falls back to #+TITLE:.
 ;;
+;;   GRADUATED BROWSER
+;;
+;;   Graduating retires a file from the active review, but that's not
+;;   always permanent, you might add changes or want to revisit it later.
+;;   `leitner-review-graduated' lists every graduated file so you can
+;;   send anything you're shaky on back to Box 1
+;;
 ;;   DASHBOARD KEYS
 ;;
 ;;   RET   Open the file list for that group (group detail view)
@@ -95,11 +103,12 @@
 ;;   s     Start a session across ALL groups
 ;;   S     Save the index manually
 ;;   g     Refresh
+;;   G     Browse graduated files across every group
 ;;
 ;;   GROUP DETAIL KEYS
 ;;
 ;;   RET   Open the file under point
-;;   r     Reset that file to Box 1
+;;   r     Reset that file to Box 1 (also reactivates it if graduated)
 ;;   d     Remove that file from the index
 ;;   a     Add a file to this group
 ;;   E     Reset the ease factor for the file under point (SM-2 hybrid)
@@ -143,14 +152,11 @@ Index 0 = Box 1 (reviewed most frequently)."
 ;; ===========================================================================
 ;;  SM-2 Hybrid Mode Customisation
 ;;
-;; SM-2 mode can be enabled globally via `leitner-sm2-hybrid' or per-group
-;; via the dashboard `e' key (stored in each group's :sm2 flag in the JSON
-;; index).  All scheduling code resolves the active mode through `leitner--sm2-active-p'
-;; The dynamic variable `leitner--active-group' is bound at every scheduling
-;; entry point so the resolver can inspect the correct group without requiring
-;; a group parameter to be threaded through inner functions
-;; The taper boundaries are controlled by `leitner-sm2-taper-start' and
-;; `leitner-sm2-taper-end'
+;; Turn it on globally with `leitner-sm2-hybrid', or per group with the
+;; dashboard `e' key (stored as :sm2 on that group).  Everything routes
+;; through `leitner--sm2-active-p', which checks `leitner--active-group'
+;; a dynamic var bound at each scheduling entry point
+;; Taper boundaries live in `leitner-sm2-taper-start'/`leitner-sm2-taper-end'.
 
 (defcustom leitner-sm2-hybrid nil
   "Enable the SM-2 ease-factor hybrid scheduling mode.
@@ -158,23 +164,22 @@ each item carries a personal ease factor (EF) that multiplies its box interval."
   :type 'boolean
   :group 'leitner)
 
-;; SM-2 default is 2.5, but here its 1.0
-;; to allow dynamic switching between leitner and sm-2
-;; without inflating the due dates, instead they stretch
-;; from where they are
+;; standard SM-2 starts at 2.5, but it's 1.0 here so flipping hybrid mode
+;; on mid-collection doesn't suddenly inflate everyone's due dates
+;; the EF only starts drifting once you actually rate something
 (defcustom leitner-sm2-default-ef 1.0
   "Starting ease factor of 1.0 for new items in SM-2 hybrid mode.
 Recommended to be >= `leitner-sm2-min-ef'."
   :type 'number
   :group 'leitner)
 
-(defcustom leitner-sm2-min-ef 1.3
+(defcustom leitner-sm2-min-ef 0.5
   "The minimum ease factor an item can decay to in SM-2 hybrid mode.
 Prevents extremely short intervals on consistently hard material."
   :type 'number
   :group 'leitner)
 
-(defcustom leitner-sm2-max-ef 4.0
+(defcustom leitner-sm2-max-ef 2.0
   "Maximum ease factor an item can grow to in SM-2 hybrid mode.
 Prevents intervals completely taking off on very easy material."
   :type 'number
@@ -225,7 +230,6 @@ Must be greater than `leitner-sm2-taper-start'."
 
 ;; ===========================================================================
 ;;  Internal State
-;; ===========================================================================
 
 ;; leitner--data  =  ((:groups . HASH-TABLE)  (:dirty . BOOL))
 ;;
@@ -282,13 +286,9 @@ requiring a `group-name' argument to be threaded through inner functions.")
 ;; ---------------------------------------------------------------------------
 ;;  SM-2 resolution helpers
 ;;
-;;  All scheduling code resolves SM-2 mode through `leitner--sm2-active-p'
-;;  rather than reading `leitner-sm2-hybrid' directly.  This allows the
-;;  global flag and per-group flags to coexist: SM-2 is active for an item
-;;  when either is set.
-;;  `leitner--active-group' is bound at every entry point (session record,
-;;  front card show, group-view render) so the inner functions see the right
-;;  group without needing a signature change.
+;;  Always go through `leitner--sm2-active-p' rather than checking
+;;  `leitner-sm2-hybrid' directly, it's the only thing that knows about
+;;  both the global flag and a group's own :sm2 flag.
 
 (defun leitner--sm2-active-p (&optional group-name)
   "Return non-nil when SM-2 hybrid mode is active for GROUP-NAME.
@@ -568,6 +568,14 @@ correct group for per-group SM-2 mode."
             (leitner--item-due-p (cdr pair)))))
    (leitner--all-pairs)))
 
+(defun leitner--graduated-pairs (&optional group-name)
+  "Graduated (group-name . item-alist) pairs, optionally filtered to GROUP-NAME."
+  (seq-filter
+   (lambda (pair)
+     (and (or (null group-name) (equal (car pair) group-name))
+          (leitner--item-graduated-p (cdr pair))))
+   (leitner--all-pairs)))
+
 (defun leitner--group-next-due-str (active)
   "Return a string for when the next item in ACTIVE becomes due.
 ACTIVE is any non-graduated items for a group."
@@ -598,10 +606,9 @@ ACTIVE is any non-graduated items for a group."
 ;; =========================================================================
 ;;  Persistence
 ;;
-;; use json-key-type 'string when reading so that JSON object keys
-;; come back as plain strings
-;; on the write side, json-encode calls symbol-name on symbol keys, so
-;; symbol-keyed alists serialise cleanly
+;; Read with json-key-type 'string so object keys come back as plain
+;; strings.  Writing out, json-encode just calls symbol-name on symbol
+;; keys, so a symbol-keyed alist serialises fine as-is.
 
 (defun leitner--data->json-sexp ()
   "Convert `leitner--data' to a JSON-encodable sexp."
@@ -776,7 +783,6 @@ Nothing is written until the interactive pass is complete."
 
 ;; =========================================================================
 ;;  Adding / Removing / Resetting Files
-;; =========================================================================
 
 (defun leitner--read-group-name (&optional prompt)
   "PROMPT for a group name with completion."
@@ -785,9 +791,10 @@ Nothing is written until the interactive pass is complete."
          (pr      (or prompt (format "Group (default %s): " default))))
     (completing-read pr names nil nil nil nil default)))
 
-;; the per-file #+LEITNER_PROMPT is not set in batch mode
-;; if batch using batch mode. Use have to use `leitner-add-file'
-;; in each files own buffer afterwards or manually add the metadata
+;; #+LEITNER_PROMPT isn't asked for in batch mode (no sane way to prompt
+;; per-file across a whole dired selection)
+;; instead run `leitner-add-file' again from its own buffer
+;; afterwards, or just add the keyword by hand
 ;;;###autoload
 (defun leitner-add-file (&optional file group)
   "Add FILE to GROUP for spaced repetition.
@@ -1277,6 +1284,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
     (define-key map (kbd "s")   #'leitner-start-session)      ; review ALL groups
     (define-key map (kbd "S")   #'leitner-save)
     (define-key map (kbd "g")   #'revert-buffer)
+    (define-key map (kbd "G")   #'leitner-review-graduated)   ; browse graduated files
     (define-key map (kbd "?")   #'leitner-menu-help)
     map)
   "Keymap for the Leitner group dashboard.")
@@ -1434,7 +1442,7 @@ for a group when either this flag or the global flag is set."
   "Echo dashboard keybindings to minibuffer."
   (interactive)
   (message
-   "Leitner: RET view  r review  e SM2-toggle  s review-all  a add-file  A new-group  R rename  d delete  S save  g refresh"))
+   "Leitner: RET view  r review  e SM2-toggle  s review-all  G graduated  a add-file  A new-group  R rename  d delete  S save  g refresh"))
 
 (defun leitner--maybe-refresh-dashboard ()
   "Silently refresh the dashboard buffer if it is alive."
@@ -1446,8 +1454,6 @@ for a group when either this flag or the global flag is set."
 
 ;; =========================================================================
 ;;  Group Detail View  (file list + status for one group)
-;;
-;; detail view for the current group, shows the file list with scheduling info
 
 (defvar leitner-group-view-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1608,9 +1614,11 @@ ease factor so users can see how adaptive scheduling is tracking."
                             "Reactivate '%s' and reset to Box 1? "
                           "Reset '%s' to Box 1? ")
                         (file-name-nondirectory path))))
-      ;; leitner--item-rate 'bad clears :graduated as well and sets it to nil
+      ;; 'reset is the only outcome that both forces box 1 *and* clears
+      ;; :graduated 'bad isn't a real outcome here, that was a typo that
+      ;; left :box as nil on every manual reset, oops
       (let ((leitner--active-group gname))
-        (leitner--replace-item gname path (leitner--item-rate item 'bad)))
+        (leitner--replace-item gname path (leitner--item-rate item 'reset)))
       (leitner--mark-dirty)
       (leitner-save)
       (setq header-line-format (leitner--gv-build-header gname))
@@ -1658,6 +1666,128 @@ its box or review history.  Only effective when SM-2 is active."
 
 
 ;; =========================================================================
+;;  Graduated Browser
+;;
+;; This view lists every graduated file (across all groups, or just one) so you
+;; can manually check them and send anything you're shaky on back to Box 1.
+;; Files you don't touch here simply stay graduated
+
+(defun leitner--grad-age-str (ts)
+  "Return a short \"how long ago\" string for Unix timestamp TS."
+  (let ((days (/ (- (leitner--now) ts) 86400.0)))
+    (if (< days 1) "<1d" (format "%dd" (floor days)))))
+
+(defun leitner--grad-column-format ()
+  "Column format for the graduated browser."
+  [("Group"     16 t)
+   ("File"      36 t)
+   ("Graduated" 12 t)
+   ("Age"        6 t)])
+
+(defun leitner--grad-entries (&optional group-name)
+  "Build tabulated-list entries for the graduated browser.
+When GROUP-NAME is non-nil, only that group's graduated files are listed."
+  (mapcar
+   (lambda (pair)
+     (let* ((gname (car pair))
+            (item  (cdr pair))
+            (path  (cdr (assq :path item)))
+            (grad  (cdr (assq :graduated item))))
+       (list (cons gname path)
+             (vector gname
+                     (file-name-nondirectory path)
+                     (leitner--format-ts grad)
+                     (leitner--grad-age-str grad)))))
+   (leitner--graduated-pairs group-name)))
+
+(defun leitner--grad-build-header (group-name)
+  "Build the header-line string for the graduated browser for GROUP-NAME."
+  (let ((n (length (leitner--graduated-pairs group-name))))
+    (propertize
+     (format "  %d graduated file%s%s   |   RET open   r bring back   g refresh   q close"
+             n (if (= n 1) "" "s")
+             (if group-name (format "  (group: %s)" group-name) ""))
+     'face '(:inherit shadow :slant italic))))
+
+(defvar-local leitner--grad-group nil
+  "The group this graduated-browser buffer is filtered to, or nil for all groups.")
+
+(defvar leitner-graduated-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map tabulated-list-mode-map)
+    (define-key map (kbd "RET") #'leitner-grad-open-file)
+    (define-key map (kbd "r")   #'leitner-grad-bring-back)
+    (define-key map (kbd "g")   #'revert-buffer)
+    (define-key map (kbd "q")   #'quit-window)
+    (define-key map (kbd "?")   #'leitner-grad-help)
+    map)
+  "Keymap for the graduated browser.")
+
+(define-derived-mode leitner-graduated-mode tabulated-list-mode "Leitner-Grad"
+  "Browse graduated files and decide whether each one stays retired."
+  (setq tabulated-list-format (leitner--grad-column-format))
+  (tabulated-list-init-header))
+
+;;;###autoload
+(defun leitner-review-graduated (&optional group-name)
+  "Browse every graduated file and decide whether it stays retired.
+With a prefix argument, limit the browser to one GROUP-NAME instead of
+every group.  Press r on a file to send it back to Box 1"
+  (interactive
+   (list (when current-prefix-arg
+           (completing-read "Limit to group: " (leitner--group-names) nil t))))
+  (leitner--ensure-data)
+  (let ((buf (get-buffer-create
+              (if group-name
+                  (format "*Leitner: Graduated (%s)*" group-name)
+                "*Leitner: Graduated*"))))
+    (with-current-buffer buf
+      (leitner-graduated-mode)
+      (setq leitner--grad-group      group-name
+            tabulated-list-entries   (lambda () (leitner--grad-entries group-name))
+            header-line-format       (leitner--grad-build-header group-name))
+      (setq-local revert-buffer-function
+                  (lambda (_auto _noconfirm)
+                    (setq header-line-format (leitner--grad-build-header group-name))
+                    (tabulated-list-print t)))
+      (tabulated-list-print t))
+    (switch-to-buffer buf)))
+
+(defun leitner-grad-open-file ()
+  "Open the file under point in the graduated browser."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+    (when id (find-file (cdr id)))))
+
+(defun leitner-grad-bring-back ()
+  "Send the graduated file under point back to Box 1.
+This is the same as rating it Reset from a normal review: the box
+resets to 1, the graduated flag clears, and (in SM-2 hybrid mode) the
+ease factor takes the usual reset penalty."
+  (interactive)
+  (let* ((id    (tabulated-list-get-id))
+         (gname (car id))
+         (path  (cdr id))
+         (item  (seq-find (lambda (it) (equal (cdr (assq :path it)) path))
+                          (leitner--group-items gname))))
+    (unless item (user-error "Leitner: no file on current line"))
+    (let ((leitner--active-group gname))
+      (leitner--replace-item gname path (leitner--item-rate item 'reset)))
+    (leitner--mark-dirty)
+    (leitner-save)
+    (setq header-line-format (leitner--grad-build-header leitner--grad-group))
+    (tabulated-list-print t)
+    (leitner--maybe-refresh-dashboard)
+    (message "Leitner: '%s' is back in the rotation at Box 1."
+             (file-name-nondirectory path))))
+
+(defun leitner-grad-help ()
+  "Echo graduated-browser keybindings."
+  (interactive)
+  (message "Leitner graduated: RET open   r bring back   g refresh   q close"))
+
+
+;; =========================================================================
 ;;  Evil-mode Compatibility
 ;;
 ;; keys `g', `?', `s', `a', `d', `A', `S' are intercepted by evil
@@ -1670,6 +1800,8 @@ its box or review history.  Only effective when SM-2 is active."
   (evil-set-initial-state 'leitner-menu-mode 'emacs)
   ;; group view (*Leitner: <group>*)
   (evil-set-initial-state 'leitner-group-view-mode 'emacs)
+  ;; graduated browser (*Leitner: Graduated*)
+  (evil-set-initial-state 'leitner-graduated-mode 'emacs)
   ;; front card (*Leitner: Review*)
   ;; SPC, s are in evil-motion-state-map too, Emacs state bypasses fixes that
   (evil-set-initial-state 'leitner-front-mode 'emacs)
@@ -1678,6 +1810,8 @@ its box or review history.  Only effective when SM-2 is active."
   (define-key leitner-menu-mode-map (kbd "k") #'evil-previous-line)
   (define-key leitner-group-view-mode-map (kbd "j") #'evil-next-line)
   (define-key leitner-group-view-mode-map (kbd "k") #'evil-previous-line)
+  (define-key leitner-graduated-mode-map (kbd "j") #'evil-next-line)
+  (define-key leitner-graduated-mode-map (kbd "k") #'evil-previous-line)
   ;; review minor mode (inside a normal note file buffer)
   ;; the bindings are all C-c l <key>  Evil does not shadow C-c prefixes in
   ;; normal state, but we use evil-make-overriding-map + normalize as a safety
