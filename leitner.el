@@ -49,6 +49,7 @@
 ;;   leitner-index-file      where the JSON index lives
 ;;   leitner-box-intervals   vector of per-box intervals in days
 ;;   leitner-default-group   group used when none is specified
+;;   leitner-session-max-items   cap on files queued per session (nil = no cap)
 ;;
 ;;   SM-2 HYBRID MODE (optional)
 ;;
@@ -146,6 +147,13 @@ Index 0 = Box 1 (reviewed most frequently)."
 (defcustom leitner-default-group "General"
   "Default group name when none is specified."
   :type 'string
+  :group 'leitner)
+
+(defcustom leitner-session-max-items nil
+  "Maximum number of files to queue in a single review session.
+Nil disables the cap every due file is queued"
+  :type '(choice (const :tag "No limit" nil)
+                  (integer :tag "Max items per session"))
   :group 'leitner)
 
 
@@ -568,6 +576,27 @@ correct group for per-group SM-2 mode."
             (leitner--item-due-p (cdr pair)))))
    (leitner--all-pairs)))
 
+;; this only ranks items for `leitner-session-max-items' trimming
+;; it has no effect on whether something counts as due, that's still
+;; `leitner--item-due-p'
+(defun leitner--item-overdue-amount (group-name item)
+  "Return how overdue ITEM (in GROUP-NAME) is, in days.
+Items that have never been reviewed are due immediately but
+aren't really neglected backlog yet, so they rank
+lowest (0.0) here, behind files that sat past their interval."
+  (let ((leitner--active-group group-name))
+    (max 0.0 (- (leitner--item-days-until-due item)))))
+
+(defun leitner--top-overdue-pairs (pairs n)
+  "Return the N most overdue pairs from PAIRS.
+PAIRS is a list of (group-name . item-alist) returned by `leitner--due-pairs'."
+  (seq-take
+   (sort (copy-sequence pairs)
+         (lambda (a b)
+           (> (leitner--item-overdue-amount (car a) (cdr a))
+              (leitner--item-overdue-amount (car b) (cdr b)))))
+   n))
+
 (defun leitner--graduated-pairs (&optional group-name)
   "Graduated (group-name . item-alist) pairs, optionally filtered to GROUP-NAME."
   (seq-filter
@@ -931,7 +960,14 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
   (when (and leitner--session
              (not (yes-or-no-p "A session is already running.  Start a new one? ")))
     (user-error "Session aborted"))
-  (let ((due (leitner--due-pairs group-name)))
+  (let* ((due       (leitner--due-pairs group-name))
+         (due-count (length due))
+         (capped    (and (integerp leitner-session-max-items)
+                          (> leitner-session-max-items 0)
+                          (> due-count leitner-session-max-items)))
+         (due       (if capped
+                        (leitner--top-overdue-pairs due leitner-session-max-items)
+                      due)))
     (if (null due)
         (message "Leitner: nothing due%s, great work!"
                  (if group-name (format " in '%s'" group-name) ""))
@@ -947,11 +983,17 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
               (list (cons :queue        queue)
                     (cons :reviewed     0)
                     (cons :total        (length queue))
-                    (cons :group-filter group-name)))
-        (message "Leitner: %d file%s due%s.  Session starting..."
-                 (length queue)
-                 (if (= (length queue) 1) "" "s")
-                 (if group-name (format " in '%s'" group-name) ""))
+                    (cons :group-filter group-name)
+                    (cons :capped       capped)))
+        (if capped
+            (message "Leitner: %d due%s -- queuing today's top %d most overdue.  Session starting..."
+                     due-count
+                     (if group-name (format " in '%s'" group-name) "")
+                     (length queue))
+          (message "Leitner: %d file%s due%s.  Session starting..."
+                   (length queue)
+                   (if (= (length queue) 1) "" "s")
+                   (if group-name (format " in '%s'" group-name) "")))
         (leitner--session-advance)))))
 
 (defun leitner--session-advance ()
@@ -1007,13 +1049,23 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
     (leitner--session-advance)))
 
 (defun leitner--session-finish ()
-  "Clean up and save after all items have been reviewed."
-  (let ((n (cdr (assq :reviewed leitner--session))))
+  "Clean up and save after all items have been reviewed.
+When the session was trimmed by `leitner-session-max-items', also
+reports how many files are still due so the remaining backlog stays
+visible instead of silently disappearing."
+  (let* ((n            (cdr (assq :reviewed leitner--session)))
+         (capped       (cdr (assq :capped       leitner--session)))
+         (group-filter (cdr (assq :group-filter leitner--session)))
+         (remaining    (and capped (length (leitner--due-pairs group-filter)))))
     (setq leitner--session nil)
     (leitner-save)
     (leitner--maybe-refresh-dashboard)
-    (message "Leitner: session complete, %d file%s reviewed.  Index saved."
-             n (if (= n 1) "" "s"))))
+    (if (and capped (> remaining 0))
+        (message "Leitner: session complete, %d file%s reviewed.  %d more due file%s waiting, run `leitner-start-session' again when you're ready. Index saved."
+                 n (if (= n 1) "" "s")
+                 remaining (if (= remaining 1) "" "s"))
+      (message "Leitner: session complete, %d file%s reviewed. Index saved."
+                n (if (= n 1) "" "s")))))
 
 
 ;; =========================================================================
