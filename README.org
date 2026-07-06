@@ -28,6 +28,7 @@ It is designed for people who take extensive, *long-form* notes but rarely revis
 
 ** Quick Start
 #+ATTR_ORG: :width 600 :alt Leitner Dashboard
+#+CAPTION: An example dashboard showing groups, boxes, and due files etc.
 [[./leitner-dashboard.png]]
 
  | Keybinding                | Command               | Description                               |
