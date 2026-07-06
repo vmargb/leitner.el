@@ -27,6 +27,9 @@ It is designed for people who take extensive, *long-form* notes but rarely revis
  #+END_SRC
 
 ** Quick Start
+#+ATTR_ORG: :width 600 :alt Leitner Dashboard
+[[./leitner-dashboard.png]]
+
  | Keybinding                | Command               | Description                               |
  |---------------------------+-----------------------+-------------------------------------------|
  | =M-x leitner=               | =leitner=               | Open the group dashboard.                 |
@@ -43,6 +46,9 @@ Each box has a defined review interval (Box 1 = 1 day, Box 2 = 3 days). Files ar
 Whenever a file is due, you review and rate your recall confidence:
 - /Good/: The file advances up by one box level (Box 1 -> Box 2). Meaning nothing needed to be changed and you understood everything.
 - /Bad/: Prompts you to either step it back one box level (made small edits) or reset it back to Box 1 (forgot important details).
+
+- /Partial/ (new): For files too long to finish re-reading in one sitting. The box & ease factor are untouched. Instead of waiting out the full box interval, the file is marked *paused* and comes due again tomorrow so you can pick up where you left off. The =dashboard= and =group-detail= view both show a =Paused= indicator until you give them a real rating. Works well with =save-place-mode=.
+
 - /Skip/: Leaves the file in its current box without altering its schedule.
 
 *** Optional question prompts
@@ -90,6 +96,7 @@ All SM-2 hybrid parameters are individually tunable to your liking:
 
 
 ** Changelog
+- /v0.3.2:/ =Partial= rating (=C-c l p=) for notes too long to finish in one sitting, box and ease are left untouched and the file is marked =Paused=, due again the next day instead of waiting out the full interval. This pairs well with =save-place-mode= to resume mid-file.
 - /v0.3.1:/ Graduated-file browser (=leitner-review-graduated=, =G= on the dashboard) to bring individual files back to Box 1 if they become important again. SM-2 floor/ceiling are now =0.5= / =2.0=, centered around the 1.0 baseline.
 - /v0.3.0:/ sm-2 implementation through =leitner-sm2-hybrid=. Applies an ease factor to each box + item.
 - /v0.2.3:/ Batch-add multiple files to group through dired mode + automation hooks for extensibility
