@@ -43,20 +43,13 @@ It is designed for people who take extensive, *long-form* notes but rarely revis
 Each box has a defined review interval (Box 1 = 1 day, Box 2 = 3 days). Files are only shown for review when their interval has elapsed. Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the review queue.
 
 Whenever a file is due, you review and rate your recall confidence:
-- /Good/: The file advances up by one box level (Box 1 -> Box 2). Meaning nothing needed to be changed and you understood everything.
-- /Bad/: Resets the file straight back to Box 1 (forgot important details, note felt unfamiliar to you, or struggled to recall).
+- /Good/: on a Box 4 file -> moves to Box 5. 
+- /Bad/: drops to Box 1 (forgot important details, note felt unfamiliar).
 
 *There are a couple new options designed for the nuances around reading:*
-- /Partial/ (new): For files too long to finish reading in one sitting. The box & ease factor are untouched. So instead of waiting out the full interval, the file is marked *paused* and comes due again the next day so you can pick up where you left off. The =dashboard= and =group-detail= view both show a =Paused= indicator until you give them a real rating. Works well with =save-place-mode=.
-
-- /Revised/ (new): For when you *edited* or *added content* instead of being tested, the box & ease factor are also untouched, but unlike =Partial= the review counts as *complete*, so the file returns on its *normal box interval* rather than tomorrow.
-
+- /Partial/ (new): For files too long to finish reading in one sitting. The file is *paused* and comes due again the next day so you can pick up where you left off. The =dashboard= shows a =Paused= indicator until you give it a real rating. Works well with =save-place-mode=.
+- /Revised/ (new): For when you *edited* or *added new content* stays in the same box, but is due tomorrow instead.
 - /Skip/: Leaves the file in its current box without altering its schedule.
-
-*Good*: on a Box 4 file -> moves to Box 5
-*Bad*: drops to Box 1
-*Partial/paused*: stays in Box 4, but is due tomorrow instead
-*Revised*: stays in Box 4, but repeats Box 4's normal interval, same wait as before
 
 *** Optional question prompts
 Though this is built around reviewing long-form documents, you can *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. You can also leave this empty and it will just ignore the prompt entirely.
