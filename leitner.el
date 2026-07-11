@@ -1,6 +1,6 @@
 ;;; leitner.el --- Leitner spaced repetition for note files  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.3.1
+;; Version: 0.3.4
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/leitner.el
@@ -38,11 +38,17 @@
 ;;     This is the Feynman step: read, compare with what you recalled, and
 ;;     update your notes where your understanding was shaky before moving on
 ;;
-;;       C-c l g   Good  confident recall     (advance one box)
-;;       C-c l b   Bad   struggled or blank   (prompts: move back one, or reset to box 1)
+;;       C-c l g   Good     confident recall      (advance one box)
+;;       C-c l b   Bad      struggled or blank    (reset to box 1)
+;;       C-c l p   Partial  file becomes due again tomorrow so you can pick up where you left off
+;;       C-c l r   Revised  edited/added content, not really a recall test  (box & ease
+;;                          untouched, file returns on its normal box interval)
 ;;       C-c l s   Skip
 ;;       C-c l q   Quit session
 ;;       C-c l ?   Show keybindings
+;;
+;;   TIP: add `(save-place-mode 1)' to your init.el so Emacs reopens a
+;;   Partial-rated file with point exactly where you stopped reading
 ;;
 ;; ~~ CUSTOMISATION ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ;;
@@ -64,8 +70,10 @@
 ;;
 ;;   The EF starts at `leitner-sm2-default-ef' (1.0) and adjusts on rating:
 ;;     Good   +`leitner-sm2-good-bonus'   (default +0.10)
-;;     Hard   -`leitner-sm2-hard-penalty' (default -0.15)
-;;     Reset  -`leitner-sm2-reset-penalty'(default -0.20)
+;;     Bad    -`leitner-sm2-reset-penalty' scaled by how far it fell, see
+;;            `leitner--sm2-bad-penalty'.  Bad always resets the item to
+;;            Box 1, but failing out of Box 1 costs nothing extra while
+;;            failing out of the top box costs the full penalty amount
 ;;   Clamped to [`leitner-sm2-min-ef', `leitner-sm2-max-ef'] (0.5 -- 2.0)
 ;;
 ;;   EF TAPERING
@@ -198,13 +206,10 @@ Prevents intervals completely taking off on very easy material."
   :type 'number
   :group 'leitner)
 
-(defcustom leitner-sm2-hard-penalty 0.15
-  "Amount subtracted from the ease factor on a Hard (back-one-box) rating."
-  :type 'number
-  :group 'leitner)
-
 (defcustom leitner-sm2-reset-penalty 0.2
-  "Amount subtracted from the ease factor on a Reset (back-to-box-1) rating."
+  "Maximum amount subtracted from the ease factor on a Bad rating.
+Every Bad rating sends the item back to Box 1, but the EF penalty is
+scaled by how far the item fell."
   :type 'number
   :group 'leitner)
 
@@ -246,7 +251,9 @@ Must be greater than `leitner-sm2-taper-start'."
 ;; item-alist  :  ((:path . STRING)  (:box . INT)
 ;;                 (:last-reviewed . INT)  (:added . INT)
 ;;                 (:graduated . INT-OR-NIL)    ; Unix ts when graduated, nil if active
-;;                 (:ease . FLOAT-OR-NIL))      ; SM-2 hybrid EF
+;;                 (:ease . FLOAT-OR-NIL)       ; SM-2 hybrid EF
+;;                 (:paused . BOOL))            ; t when the last rating was Partial
+;;                                               ; cleared by any other rating
 ;;
 ;; All mutations go through setcdr+assq to modify the shared cons cells
 ;; in-place.  Never use alist-get as a setf target with a gethash argument
@@ -336,6 +343,20 @@ ladder already encodes mastery at that level."
            (float (- end start)))))))
 
 
+;; taper-weight scales EF *influence* down near the top box (mastery
+;; is already encoded by box position there)
+;; likewise, failing near the top box costs more than
+;; falling from a lower box
+(defun leitner--sm2-bad-penalty (old-box)
+  "Return the EF penalty to apply for a Bad rating made from OLD-BOX.
+Every Bad rating resets the item to Box 1 regardless, but the EF hit
+scales with how far OLD-BOX was from Box 1"
+  (let* ((nb     (leitner--num-boxes))
+         (weight (if (<= nb 1) 1.0
+                   (/ (float (1- old-box)) (float (1- nb))))))
+    (* leitner-sm2-reset-penalty weight)))
+
+
 (defun leitner--item-ease (item)
   "Return the ease factor for ITEM.
 When SM-2 is inactive (resolved via `leitner--active-group') returns 1.0.
@@ -389,16 +410,25 @@ ease factor `leitner-sm2-default-ef'."
         (cons :last-reviewed 0)
         (cons :added         (leitner--now))
         (cons :graduated     nil)
-        (cons :ease          leitner-sm2-default-ef)))
+        (cons :ease          leitner-sm2-default-ef)
+        (cons :paused        nil)))
 
 (defun leitner--item-graduated-p (item)
   "Return non-nil when ITEM has been graduated (fully mastered)."
   (cdr (assq :graduated item)))
 
+(defun leitner--item-paused-p (item)
+  "Return non-nil when ITEM was last rated Partial (mid re-read).
+Cleared automatically the next time the item is rated with any
+outcome other than `partial'."
+  (cdr (assq :paused item)))
+
 (defun leitner--item-rate (item outcome)
   "Return a NEW item-alist for ITEM rated with OUTCOME.
 In SM-2 hybrid mode the ease factor is adjusted according to the outcome.
-The EF is clamped between `leitner-sm2-min-ef' & `leitner-sm2-max-ef'."
+The EF is clamped between `leitner-sm2-min-ef' & `leitner-sm2-max-ef'.
+OUTCOME `reset' is a Bad rating, it always sends the item straight back
+to Box 1, and the EF penalty is scaled by how far it fell."
   (let* ((old-box (cdr (assq :box item)))
          (last-box (leitner--num-boxes))
          ;; graduating: good rating on the final box
@@ -406,29 +436,39 @@ The EF is clamped between `leitner-sm2-min-ef' & `leitner-sm2-max-ef'."
          (new-box (pcase outcome
                     ('good (if graduating last-box (1+ old-box)))
                     ('reset  1)
-                    ('hard (max 1 (1- old-box)))
-                    ('skip old-box)))
+                    ('skip old-box)
+                    ('partial old-box)
+                    ('revised old-box)))
          ;; SM-2 hybrid: update ease factor
          (old-ef (leitner--item-ease item))
          (new-ef (if (leitner--sm2-active-p leitner--active-group)
                      (let ((raw (pcase outcome
                                   ('good  (+ old-ef leitner-sm2-good-bonus))
-                                  ('hard  (- old-ef leitner-sm2-hard-penalty))
-                                  ('reset (- old-ef leitner-sm2-reset-penalty))
-                                  ('skip  old-ef))))
+                                  ('reset (- old-ef (leitner--sm2-bad-penalty old-box)))
+                                  ('skip  old-ef)
+                                  ('partial old-ef)
+                                  ('revised old-ef))))
                        (max leitner-sm2-min-ef
                             (min leitner-sm2-max-ef raw)))
                    ;; SM-2 inactive: preserve stored EF so toggling on later
                    ;; picks up the existing value correctly
-                   old-ef)))
+                   old-ef))
+         ;; partial: backdate :last-reviewed so the effective interval
+         ;; is satisfied exactly one day from now
+         (interval (leitner--item-interval-secs item)))
     (list (cons :path          (cdr (assq :path item)))
           (cons :box           new-box)
-          (cons :last-reviewed (if (eq outcome 'skip)
-                                   (cdr (assq :last-reviewed item))
-                                 (leitner--now)))
+          (cons :last-reviewed (cond
+                                 ((eq outcome 'skip)
+                                  (cdr (assq :last-reviewed item)))
+                                 ((eq outcome 'partial)
+                                  (max 0 (- (leitner--now)
+                                            (max 0 (- interval 86400)))))
+                                 (t (leitner--now))))
           (cons :added         (cdr (assq :added item)))
           (cons :graduated     (if graduating (leitner--now) nil))
-          (cons :ease          new-ef))))
+          (cons :ease          new-ef)
+          (cons :paused        (eq outcome 'partial)))))
 
 (defun leitner--format-ts (ts)
   "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0."
@@ -619,7 +659,7 @@ ACTIVE is any non-graduated items for a group."
       (if (< min-days 1)
           (propertize "<1d" 'face 'font-lock-keyword-face)
         (propertize (format "%dd" (floor min-days)) 'face 'font-lock-keyword-face)))
-     (active  (propertize "0d" 'face 'warning))
+     (active  (propertize "now" 'face 'warning))
      (t       "—")))) ; the only time an em-dash is acceptable
 
 (defun leitner--path-registered-p (path &optional group-name)
@@ -658,7 +698,10 @@ ACTIVE is any non-graduated items for a group."
                                                   :json-false))
                          ;; :ease is always written, older readers ignore it
                          (cons 'ease          (or (cdr (assq :ease item))
-                                                  leitner-sm2-default-ef))))
+                                                  leitner-sm2-default-ef))
+                         ;; :paused is always written, older readers ignore it
+                         (cons 'paused        (if (cdr (assq :paused item))
+                                                  t :json-false))))
                  items))))
              ;; gname is a string; json-encode-key handles strings directly.
              (push (cons gname (list (cons 'name  gname)
@@ -681,8 +724,9 @@ ACTIVE is any non-graduated items for a group."
              (items
               (mapcar
                (lambda (raw)
-                 (let ((grad (cdr (assoc "graduated" raw)))
-                       (ease (cdr (assoc "ease" raw))))
+                 (let ((grad   (cdr (assoc "graduated" raw)))
+                       (ease   (cdr (assoc "ease" raw)))
+                       (paused (cdr (assoc "paused" raw))))
                    (list (cons :path          (cdr (assoc "path"          raw)))
                          (cons :box           (cdr (assoc "box"           raw)))
                          (cons :last-reviewed (cdr (assoc "last_reviewed" raw)))
@@ -698,7 +742,11 @@ ACTIVE is any non-graduated items for a group."
                          ;; :ease: fall back to default for pre-hybrid items
                          (cons :ease          (if (and ease (numberp ease))
                                                   ease
-                                                leitner-sm2-default-ef)))))
+                                                leitner-sm2-default-ef))
+                         ;; :paused: defaults to nil for index files written
+                         ;; before Partial ratings existed
+                         (cons :paused        (and paused
+                                                    (not (eq paused :json-false)))))))
                items-list)))
         (let ((sm2-val (cdr (assoc "sm2" gdata))))
           (puthash gname
@@ -1012,7 +1060,7 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
           (leitner--show-front-card pair))))))
 
 (defun leitner--session-record (outcome)
-  "Record the OUTCOME (good/bad:{hard,reset}/skip) for the current item and advance."
+  "Record the OUTCOME (good/reset/partial/skip/revised) for the current item and advance."
   (unless leitner--session
     (user-error "Leitner: no active session"))
   (let* ((queue    (cdr (assq :queue leitner--session)))
@@ -1033,12 +1081,14 @@ With a optional prefix argument, prompt to limit review to one GROUP-NAME."
                                (propertize "Graduated! Removed from active queue."
                                            'face 'success)
                              (format "Good -> Box %d" (cdr (assq :box new-item)))))
-                     ('reset  "Reset -> Box 1")
-                     ('hard (if (= (cdr (assq :box new-item)) 1)
-                                    (propertize "Already in Box 1" 'face 'warning)
-                                  (format "Down -> Box %d" (cdr (assq :box new-item)))))
+                     ('reset  "Bad -> Box 1")
+                     ('partial (propertize "Paused, due again tomorrow"
+                                           'face 'font-lock-doc-face))
+                     ('revised (propertize "Revised, box unchanged"
+                                           'face 'font-lock-doc-face))
                      ('skip "Skipped")))
-           (ef-suffix (if (and (leitner--sm2-active-p gname) (not (eq outcome 'skip)))
+           (ef-suffix (if (and (leitner--sm2-active-p gname)
+                                (not (memq outcome '(skip partial revised))))
                           (format "  [EF %.2f]" (leitner--item-ease new-item))
                         "")))
       (message "Leitner: %s%s  (%d / %d done)"
@@ -1221,6 +1271,8 @@ visible instead of silently disappearing."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c l g") #'leitner-rate-good)
     (define-key map (kbd "C-c l b") #'leitner-rate-bad)
+    (define-key map (kbd "C-c l p") #'leitner-rate-partial)
+    (define-key map (kbd "C-c l r") #'leitner-rate-revised)
     (define-key map (kbd "C-c l s") #'leitner-rate-skip)
     (define-key map (kbd "C-c l q") #'leitner-quit-session)
     (define-key map (kbd "C-c l ?") #'leitner-review-help)
@@ -1229,7 +1281,9 @@ visible instead of silently disappearing."
 
 
 ;; [leitner-rate-good]   Good  (advance one box)
-;; [leitner-rate-bad]    Bad   (prompts: back one box or reset to box 1)
+;; [leitner-rate-bad]    Bad   (reset to box 1)
+;; [leitner-rate-partial] Partial (box & ease untouched, due again tomorrow)
+;; [leitner-rate-revised] Revised (box & ease untouched, due on normal schedule)
 ;; [leitner-rate-skip]   Skip
 ;; [leitner-quit-session]   Quit session
 ;; [leitner-review-help]    Show keybindings"
@@ -1264,7 +1318,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
                                  (format "  EF %.2f" (leitner--item-ease leitner--review-item)))
                              ""))
                    'face '(:slant italic))
-       (propertize "    C-c l g Good   C-c l b Bad   C-c l s Skip   C-c l q Quit"
+       (propertize "    C-c l g Good   C-c l b Bad   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit"
                    'face '(:inherit shadow))))))
 
 (defun leitner--on-review-buffer-kill ()
@@ -1280,23 +1334,25 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
 
 ;;;###autoload
 (defun leitner-rate-bad ()
-  "Prompt whether to move the item back one box or reset to Box 1."
+  "Rate current review item BAD (reset straight to Box 1)."
   (interactive)
-  (let* ((accent-face 'font-lock-keyword-face)
-         (prompt
-          (concat
-           "Bad rating: ["
-           (propertize "b" 'face accent-face)
-           "]ack one box(hard), ["
-           (propertize "r" 'face accent-face)
-           "]eset to Box 1(complete blank), ["
-           (propertize "q" 'face accent-face)
-           "]uit? "))
-         (choice (read-char-choice prompt '(?b ?r ?q))))
-    (pcase choice
-      (?b (leitner--session-record 'hard))
-      (?r (leitner--session-record 'reset))
-      (?q (message "Leitner: rating cancelled.")))))
+  (leitner--session-record 'reset))
+
+;;;###autoload
+(defun leitner-rate-partial ()
+  "Rate current review item PARTIAL: ran out of time / only read part of it.
+Box and ease factor are left exactly as they are, just paused partway
+through.  The file is marked paused and scheduled to come due tomorrow."
+  (interactive)
+  (leitner--session-record 'partial))
+
+;;;###autoload
+(defun leitner-rate-revised ()
+  "You revised or added more information to your notes on review.
+unlike `leitner-rate-partial' the review counts as complete, the file
+returns on its normal box interval, new content and all."
+  (interactive)
+  (leitner--session-record 'revised))
 
 ;;;###autoload
 (defun leitner-rate-skip ()
@@ -1318,7 +1374,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
 (defun leitner-review-help ()
   "Echo review keybindings in minibuffer."
   (interactive)
-  (message "Leitner: C-c l g Good   C-c l b Bad (prompts)   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
+  (message "Leitner: C-c l g Good   C-c l b Bad   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
 
 ;; =========================================================================
 ;;  Dashboard, main entry point showing each group
@@ -1348,6 +1404,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
          (list "SM2"     4 nil)
          (list "Files"   7 t)
          (list "Due"     5 t)
+         (list "Pause"   6 t)
          (list "Next"    6 t))
    (cl-loop for i from 1 to (leitner--num-boxes)
             collect (list (format "B%d" i) 5 t))
@@ -1380,6 +1437,7 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
               (n      (length items))
               (active (seq-filter (lambda (it) (not (leitner--item-graduated-p it))) items))
               (due    (length (seq-filter #'leitner--item-due-p active)))
+              (paused (length (seq-filter #'leitner--item-paused-p active)))
               (next   (leitner--group-next-due-str active))
               (grad   (- n (length active)))
               (boxes  (make-vector nb 0))
@@ -1394,6 +1452,9 @@ In SM-2 hybrid mode the current ease factor is appended after the box number."
                       (number-to-string n)
                       (if (> due 0)
                           (propertize (number-to-string due) 'face 'warning)
+                        "0")
+                      (if (> paused 0)
+                          (propertize (number-to-string paused) 'face 'font-lock-doc-face)
                         "0")
                       next)
                 (cl-loop for i from 0 below nb
@@ -1550,12 +1611,14 @@ Appends an Ease column when SM-2 is active for the current group."
          (grad   (length (seq-filter #'leitner--item-graduated-p items)))
          (active (- n grad))
          (due    (length (seq-filter #'leitner--item-due-p items)))
+         (paused (length (seq-filter #'leitner--item-paused-p items)))
          (sm2-p  (leitner--sm2-active-p group-name)))
     (propertize
-     (format "  %s%s   |   %d active  %d graduated   |   %d due   |   RET open  r reset  E reset-ease  d remove  a add  q close"
+     (format "  %s%s   |   %d active  %d graduated   |   %d due%s   |   RET open  r reset  E reset-ease  d remove  a add  q close"
              group-name
              (if sm2-p " [sm2]" "")
-             active grad due)
+             active grad due
+             (if (> paused 0) (format "   |   %d paused" paused) ""))
      'face 'mode-line)))
 
 (defun leitner--gv-entries (group-name)
@@ -1565,19 +1628,23 @@ ease factor so users can see how adaptive scheduling is tracking."
   (let ((leitner--active-group group-name))
     (mapcar
      (lambda (item)
-       (let* ((path  (cdr (assq :path item)))
-              (box   (cdr (assq :box  item)))
-              (lr    (cdr (assq :last-reviewed item)))
-              (grad  (cdr (assq :graduated item)))
-              (due-p (leitner--item-due-p item))
-              (days  (leitner--item-days-until-due item))
+       (let* ((path   (cdr (assq :path item)))
+              (box    (cdr (assq :box  item)))
+              (lr     (cdr (assq :last-reviewed item)))
+              (grad   (cdr (assq :graduated item)))
+              (paused (leitner--item-paused-p item))
+              (due-p  (leitner--item-due-p item))
+              (days   (leitner--item-days-until-due item))
               (due-str
                (cond (grad       (propertize "—"       'face 'shadow))
                      ((= lr 0)   (propertize "new"     'face 'warning))
+                     (paused     (propertize (if due-p "paused, due" (format "paused (%.0fd)" days))
+                                             'face 'font-lock-doc-face))
                      (due-p      (propertize "overdue" 'face 'warning))
                      (t          (format "%.0fd" days))))
               (status
                (cond (grad   (propertize "Grad" 'face 'success))
+                     (paused (propertize "Paused" 'face 'font-lock-doc-face))
                      (due-p  (propertize "Yes"  'face 'warning))
                      (t      "")))
               (base-vec
