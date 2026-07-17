@@ -55,43 +55,10 @@ Whenever a file is due, you review and rate your recall confidence:
 Though this is built around reviewing long-form documents, you can *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. You can also leave this empty and it will just ignore the prompt entirely.
 
 
-** Why Leitner and not something better like FSRS?
+** Why Leitner and not SM-2 or FSRS?
 On top of Leitner being much simpler to implement. Leitner's structure is transparent and you control it directly, whereas the others require trusting an algorithm's decision about when something should resurface, which is perfect for cards that are incredibly high in quantity(like vocabulary or definitions, concepts etc).
 
 However, in my experience these algorithms seem to matter /less/ for simply re-reading your notes(rather than active-recall) especially *longer-form* notes where active-recall is impossible anyways. In this case you may want to see related material grouped together in fixed boxes with a more predictable spacing effect, that simplicity and control might actually be preferable(at least it is for me).
-
-However, the =SM-2= hybrid mode exists for this middle ground if you really want it. When you have a deck that's large enough, you can toggle on sm-2, and it will adapt to your existing scheduling data from where you left off.
-
-
-** SM-2 Hybrid Mode (Optional)
-As your collection grows into the hundreds or thousands, you can optionally opt into *SM-2 hybrid mode*. This keeps the Leitner box structure completely intact, but gives each file a personal *ease factor* (EF) that scales its review interval:
-
-#+BEGIN_EXAMPLE
-effective interval = box interval × ease factor
-#+END_EXAMPLE
-
-*** Enabling hybrid mode
-
-#+BEGIN_SRC emacs-lisp
-(setq leitner-sm2-hybrid t)
-#+END_SRC
-
-That's it.
-
-Enabling it midway through your workflow is safe. All files in the group start with an ease factor of =1.0=, so their intervals are completely unchanged on day one. The EF only begins drifting from actual review behaviour going forward, so that sm-2 doesn't completely take over.
-
-*** Customization
-
-All SM-2 hybrid parameters are individually tunable to your liking:
-
-#+BEGIN_SRC emacs-lisp
-(setq leitner-sm2-hybrid        t)    ; enable hybrid mode
-(setq leitner-sm2-default-ef    1.0)  ; neutral starting EF for all items
-(setq leitner-sm2-min-ef        0.5)  ; floor sits below the 1.0 baseline so Hard/Reset can shrink intervals
-(setq leitner-sm2-max-ef        2.0)  ; caps a Good streak at ~2x a box's plain interval
-(setq leitner-sm2-good-bonus    0.10) ; EF gain per Good rating
-(setq leitner-sm2-reset-penalty 0.20) ; max EF loss on Bad, scaled down the closer the item was to Box 1
-#+END_SRC
 
 
 ** Changelog
