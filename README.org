@@ -1,27 +1,32 @@
-#+TITLE: leitner.el: Spaced Repetition for your org notes.
+#+TITLE: resurface.el: rereading, drilling, and resurfacing for your org notes.
 #+AUTHOR: vmargb
-#+DESCRIPTION: Leitner box system for reviewing whole note files.
+#+DESCRIPTION: Resurface material for review, Leitner box system for whole files, or Drill mode for rereading sentences.
 #+LICENSE: GPL-3.0-or-later
 
-** What is Leitner?
-=leitner.el= is an Emacs package that applies the classic =Leitner box system= to your note-taking workflow, this is for /re-reading/ your notes and /revising/ them, not for active recall(though it can be used that way)
+#+BEGIN_QUOTE
+=resurface.el= is a package designed only for my own unique use-case, but feel free to try it if you also find it useful. I use this mostly for re-reading my long-form notes for hard concepts(Leitner-mode). And for language-learning (drill-mode). Whichever you choose, the main purpose is *rereading* material you want to be resurfaced to you, /not/ flashcards or active-recall.
+#+END_QUOTE
 
-It is designed for people who take extensive, *long-form* notes but rarely revisit them, or find themselves overwhelmed by the volume of these long notes to review. Rather than letting them idle away in a folder somewhere, you simply use =leitner-add-file= which takes care of when to /resurface/ the file for your next re-reading session.
+** What is Resurface?
+=resurface.el= is an Emacs package that brings material back for review on a schedule instead of leaving it to whenever you happen to remember it exists. =Leitner-mode= applies the classic =Leitner box system= to your note-taking workflow, this is for /re-reading/ your *longer-form* notes and /revising/ them, not for active recall (though it can be used that way). Drill-mode does the same but for *short* sentences/chunks you want to practice rereading /repeatedly/, *not* recalling them.
+
+Simply use =resurface-leitner-add-file= which handles when to /resurface/ the file for your next re-reading/revising session.
 
 ** Installation with =package-vc-install= (emacs 29+)
- Add the following to your ~init.el~, you can assign your own intervals and file-path, otherwise it will use your user emacs directory:
+ Add the following to your ~init.el~:
 
  #+BEGIN_SRC emacs-lisp
-   (use-package leitner
-     :vc (:url "https://github.com/vmargb/leitner.el")
-     :bind ("C-c r l" . leitner))
+    (use-package resurface
+      :vc (:url "https://github.com/vmargb/resurface.el")
+      :bind ("C-c r l" . resurface-leitner)
+      :bind ("C-c r d" . resurface-drill))
  #+END_SRC
 
 *** Example Customization
  #+BEGIN_SRC emacs-lisp
- (setq leitner-index-file "~/notes/.leitner-index.json") ; change location
- (setq leitner-box-intervals [1 2 4 8 16 32]) ; set your own intervals
- (setq leitner-default-group "General") ; default when group not provided
+ (setq resurface-index-file "~/notes/.resurface-index.json") ; change location
+ (setq resurface-leitner-intervals [1 2 4 8 16 32]) ; set your own intervals
+ (setq resurface-leitner-default-group "General") ; default when group not provided
  #+END_SRC
 
 ** Quick Start
@@ -31,29 +36,64 @@ It is designed for people who take extensive, *long-form* notes but rarely revis
 
  | Keybinding                | Command               | Description                               |
  |---------------------------+-----------------------+-------------------------------------------|
- | =M-x leitner=               | =leitner=               | Open the group dashboard.                 |
- | =M-x leitner-add-group=     | =leitner-add-group=     | Add a new group.                          |
- | =M-x leitner-add-file=      | =leitner-add-file=      | Add the current buffer's file to a group. |
- | =M-x leitner-start-session= | =leitner-start-session= | Start a review session for due files.     |
- | =M-x leitner-review-graduated= | =leitner-review-graduated= | Browse graduated files; bring any back to Box 1. |
- | =M-x leitner-healthcheck=   | =leitner-healthcheck=   | Resolve deleted/renamed/moved files.      |
+ | =M-x resurface-leitner=               | =resurface-leitner=               | Open the group dashboard.                 |
+ | =M-x resurface-leitner-add-group=     | =resurface-leitner-add-group=     | Add a new group.                          |
+ | =M-x resurface-leitner-add-file=      | =resurface-leitner-add-file=      | Add the current buffer's file to a group. |
+ | =M-x resurface-leitner-start-session= | =resurface-leitner-start-session= | Start a review session for due files.     |
+ | =M-x resurface-leitner-review-graduated= | =resurface-leitner-review-graduated= | Browse graduated files; bring any back to Box 1. |
+ | =M-x resurface-leitner-healthcheck=   | =resurface-leitner-healthcheck=   | Resolve deleted/renamed/moved files.      |
 
 
-** How It Works
-Each box has a defined review interval (Box 1 = 1 day, Box 2 = 3 days). Files are only shown for review when their interval has elapsed. Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the review queue.
+** How Leitner Works
+Each box has a defined review interval (Box 1 = 1 day, Box 2 = 3 days). Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the review queue.
 
 Whenever a file is due, you review and rate your recall confidence:
-- /Good/: on a Box 4 file -> moves to Box 5. 
-- /Bad/: drops to Box 1 (forgot important details, note felt unfamiliar).
+- /Good/: Box 4 file -> moves to Box 5. 
+- /Bad/: drops back down to Box 1 (forgot important details, note felt unfamiliar or required heavy revising).
 
 *There are a couple new options designed for the nuances around reading:*
-- /Partial/ (new): For files too long to finish reading in one sitting. The file is *paused* and comes due again the next day so you can pick up where you left off. The =dashboard= shows a =Paused= indicator until you give it a real rating. Works well with =save-place-mode=.
+- /Partial/ (new): For files too long to finish reading in one sitting. The file is *paused* and comes due again the next day so you can pick up where you left off. Works well with =save-place-mode=.
 - /Revised/ (new): For when you *edited* or *added new content* stays in the same box, but is due tomorrow instead.
 - /Skip/: Leaves the file in its current box without altering its schedule.
 
 *** Optional question prompts
-Though this is built around reviewing long-form documents, you can *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. You can also leave this empty and it will just ignore the prompt entirely.
+Though this is built around reviewing long-form documents, you /can/ *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. Or just leave this empty and it will ignore the prompt entirely.
 
+
+** Drill Mode: rereading sentences, not testing recall
+Drill mode is a *second, parallel* review system, built specifically for language learning (but can be generalized for anything else). The idea comes from the book *Henle's Latin* where you practice re-reading the same sentence many many times until the meaning naturally /emerges/ out of the repetiton. There is no hidden "answer" to reveal, and no good/bad rating. Every session you just say whether a sentence feels *opaque* or if it feels *clear* yet.
+
+ | Keybinding                       | Command                       | Description                                    |
+ |-----------------------------------+--------------------------------+-------------------------------------------------|
+ | =M-x resurface-drill=                 | =resurface-drill=                 | Open the drill block dashboard.                |
+ | =M-x resurface-drill-add-block=       | =resurface-drill-add-block=       | Add a new drill block.                         |
+ | =M-x resurface-drill-add-sentence=    | =resurface-drill-add-sentence=    | Add a sentence/chunk to a block.               |
+ | =M-x resurface-drill-add-lines-from-region= | =resurface-drill-add-lines-from-region= | Add every non-blank line in the region as its own sentence. |
+ | =M-x resurface-drill-start-session=   | =resurface-drill-start-session=   | Drill all due sentences (=C-u=: one block).      |
+ | =M-x resurface-drill-review-retired=  | =resurface-drill-review-retired=  | Browse retired sentences; bring any back to Active. |
+
+*** How it works
+A drill item is scored on how much saturated exposure it has had. Sentences move through three modes instead of numbered boxes:
+
+=active -> stabilizing -> maintenance -> retired=
+
+During a drill session, the sentence is shown directly (no reveal step) with three ratings:
+- /Clear/: arrived at understanding, counts toward promotion.
+- /Opaque/: still needs work, resets the streak, resurfaces tomorrow.
+- /Retire now/: force-retire immediately, regardless of thresholds.
+- /Skip/: leave the sentence untouched.
+
+Movement needs *both* enough consecutive =Clear= outcomes (=resurface-drill-promote-exposures=, default 3) *and* a minimum number of days having passed in that mode (=resurface-drill-min-days-per-mode=, default 3, that stops an easy sentence graduating on day one). An =Opaque= outcome resets that streak to zero and always brings the sentence back tomorrow, regardless of its mode's normal interval. If it happens in =maintenance=, the sentence also demotes straight back to =active=, if it got rusty.
+
+You can also batch-retire an entire block at once from its detail view (=R=), rather than only ever retiring one sentence at a time, handy once you have hundreds patterns that have been absorbed.
+
+*** Example Customization
+#+BEGIN_SRC emacs-lisp
+(setq resurface-drill-intervals '((active . 1) (stabilizing . 4) (maintenance . 14))) ; days between resurfacing, per mode
+(setq resurface-drill-promote-exposures 3)   ; consecutive Clear outcomes needed to advance a mode
+(setq resurface-drill-min-days-per-mode 3)   ; mandatory minimum days spent in a mode before advancing
+(setq resurface-drill-default-block "General")
+#+END_SRC
 
 ** Why Leitner and not SM-2 or FSRS?
 On top of Leitner being much simpler to implement. Leitner's structure is transparent and you control it directly, whereas the others require trusting an algorithm's decision about when something should resurface, which is perfect for cards that are incredibly high in quantity(like vocabulary or definitions, concepts etc).
@@ -62,12 +102,10 @@ However, in my experience these algorithms seem to matter /less/ for simply re-r
 
 
 ** Changelog
+- /v0.4.0:/ Drill mode (=resurface-drill=): a parallel review system for rereading short sentences/chunks rather than whole files, built for language learning. No recall grading, items move =active -> stabilizing -> maintenance -> retired=.
 - /v0.3.4:/ New =Revised= rating (=C-c l r=) for reviews where you edited or added notes rather than being tested on them. Box and ease factor stay untouched, the review counts as complete, so the file returns on its normal box interval.
-- /v0.3.3:/ The ease-factor on a Bad rating now scales automatically with how far the item *fell* (failing at Box 1 costs nothing, but failing at a later box costs more), so =SM-2= hybrid still tells /easy slips/ apart from *real forgetting*.
 - /v0.3.2:/ =Partial= rating (=C-c l p=) for notes too long to finish in one sitting, the file is now marked =Paused=, due again the next day instead of waiting out the full interval.
-- /v0.3.1:/ Graduated-file browser (=leitner-review-graduated=, =G= on the dashboard) to bring individual files back to Box 1 if they become important again.
-- /v0.3.0:/ sm-2 implementation through =leitner-sm2-hybrid=. Applies an ease factor to each box + item.
+- /v0.3.1:/ Graduated-file browser (=resurface-leitner-review-graduated=, =G= on the dashboard) to bring individual files back to Box 1 if they become important again.
 - /v0.2.3:/ Batch-add multiple files to group through dired mode + automation hooks for extensibility
 - /v0.2.2:/ Rename groups + Healthcheck to resolve rename/delete/moved files in a group
 - /v0.2.1:/ Random box shuffling & optional question prompts for review
-- /v0.2.0:/ Complete Leitner box system implementation with dashboard + algorithm and scheduling metadata.
