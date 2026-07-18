@@ -1,4 +1,4 @@
-#+TITLE: resurface.el: rereading, drilling, and resurfacing for your org notes.
+#+TITLE: resurface.el: rereading, drilling, and revising for your org notes.
 #+AUTHOR: vmargb
 #+DESCRIPTION: Resurface material for review, Leitner box system for whole files, or Drill mode for rereading sentences.
 #+LICENSE: GPL-3.0-or-later
@@ -90,16 +90,18 @@ You can also batch-retire an entire block at once from its detail view (=R=), ra
 *** Example Customization
 #+BEGIN_SRC emacs-lisp
 (setq resurface-drill-intervals '((active . 1) (stabilizing . 4) (maintenance . 14))) ; days between resurfacing, per mode
-(setq resurface-drill-promote-exposures 3)   ; consecutive Clear outcomes needed to advance a mode
-(setq resurface-drill-min-days-per-mode 3)   ; mandatory minimum days spent in a mode before advancing
+(setq resurface-drill-promote-exposures 3) ; consecutive Clear outcomes needed to advance a mode
+(setq resurface-drill-min-days-per-mode 3) ; mandatory minimum days spent in a mode before advancing
 (setq resurface-drill-default-block "General")
 #+END_SRC
 
 ** Why Leitner and not SM-2 or FSRS?
-On top of Leitner being much simpler to implement. Leitner's structure is transparent and you control it directly, whereas the others require trusting an algorithm's decision about when something should resurface, which is perfect for cards that are incredibly high in quantity(like vocabulary or definitions, concepts etc).
+Those are the right tools for a large quantity of small atomic facts with a clear right/wrong signal, such as vocab, dates, definitions, etc,. 
 
-However, in my experience these algorithms seem to matter /less/ for simply re-reading your notes(rather than active-recall) especially *longer-form* notes where active-recall is impossible anyways. In this case you may want to see related material grouped together in fixed boxes with a more predictable spacing effect, that simplicity and control might actually be preferable(at least it is for me).
+=Leitner= and =Drill= mode does not have to be a /worse/ version of that, I've instead *re-purposed* them for a different category of tasks, where that signal doesn't exist in the first place, which are *non-retrieval activities*. There are many of these types of activities, two of them are:
 
+- *Whole-file review.* Rereading a 1000-word org file and rating it "bad" because you couldn't recall it perfectly from memory is practically impossible, there's no single "answer" that was right or wrong. We're not practicing active-recall here, but deciding whether you're still comfortable or familiar with the material instead, and seeing that same file again later in the /same/ session because you rated it "bad" is impractical, even moreso when there's many of these files to review in one day.
+- *Sentence Drilling.* You're rereading a sentence until you hit an /Aha!/ moment, as a /cognitive activity/, *not* active-recall. There's nothing to grade against a forgetting curve, because nothing was being retrieved in the first place.
 
 ** Changelog
 - /v0.4.0:/ Drill mode (=resurface-drill=): a parallel review system for rereading short sentences/chunks rather than whole files, built for language learning. No recall grading, items move =active -> stabilizing -> maintenance -> retired=.
