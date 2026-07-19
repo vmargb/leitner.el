@@ -44,12 +44,8 @@ Simply use =resurface-leitner-add-file= which handles when to /resurface/ the fi
  | =M-x resurface-leitner-healthcheck=   | =resurface-leitner-healthcheck=   | Resolve deleted/renamed/moved files.      |
 
 
-** How Leitner Works
-Each box has a defined review interval (Box 1 = 1 day, Box 2 = 3 days). Once a file reaches the final box and is rated "Good," it /graduates/ and is removed from the review queue.
-
-Whenever a file is due, you review and rate your recall confidence:
-- /Good/: Box 4 file -> moves to Box 5. 
-- /Bad/: drops back down to Box 1 (forgot important details, note felt unfamiliar or required heavy revising).
+** Leitner mode
+You can read more about Leitner system [[https://en.wikipedia.org/wiki/Leitner_system][here]].
 
 *There are a couple new options designed for the nuances around reading:*
 - /Partial/ (new): For files too long to finish reading in one sitting. The file is *paused* and comes due again the next day so you can pick up where you left off. Works well with =save-place-mode=.
