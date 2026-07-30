@@ -1,6 +1,6 @@
 ;;; resurface.el --- Resurface material for rereading, drilling, and review  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.4.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/resurface.el
@@ -11,15 +11,37 @@
 ;; leaving it to whenever you happen to remember it exists.  It offers two
 ;; independent strategies, pick whichever fits what you're reviewing:
 ;;
-;;   - Leitner  (`resurface-leitner'): the classic Leitner box system, run
-;;     over WHOLE NOTE FILES instead of individual flashcards.  Write notes
-;;     as usual; this surfaces them for review on a Leitner schedule.
-;;   - Drill    (`resurface-drill'): rereading short sentences or chunks
-;;     (e.g. lines from a language-learning text) until they stop feeling
-;;     like work, with no right/wrong grading -- only `clear' vs `opaque'.
+;;   - Leitner  (`resurface-leitner'): whole note files, resurfaced
+;;     on a schedule driven by a rolling FAMILIARITY signal rather than a
+;;     single pass/fail rating, see "The Familiarity Scheduler" for more info.
+;;   - Drill    (`resurface-drill', resurface-drill.el): for sentence mining
+;;     and rereading sentences (e.g. lines from a language-learning text) until
+;;     they naturally make sense, with no right/wrong grading, only
+;;     `clear' vs `opaque'.
 ;;
-;; Both share one JSON index file; FILES ARE NEVER MODIFIED -- all
+;; Both share one JSON index file; FILES ARE NEVER MODIFIED, all
 ;; scheduling metadata lives externally in `resurface-index-file'.
+;;
+;; -----------------------------------------
+;; Familiarity Scheduler (Leitner mode)
+;;
+;; A single session's rating is a noisy, one-off observation, not a
+;; reliable measurement, so no single Familiar/Unfamiliar rating changes
+;; a files box directly.  Ratings only ever modify the familiarity history
+;; a box change only occurs when the confidence estimate crosses a threshold
+;;
+;;   1. Every rating is appended to a short rolling history (`resurface-
+;;      leitner-history-length').
+;;   2. That history is turned into a CONFIDENCE score in [-1, +1] by a
+;;      recency-weighted average (`resurface-leitner-weighting').
+;;   3. Confidence only moves the box once it clears a threshold.  Then the
+;;      history is cleared so the next transition needs its own evidence
+;;   4. Unliked standard Leitner, each box now has an IDEAL interval, not
+;;      an exact deadline.  The actual next-review is chosen from a small window
+;;      around that ideal (`resurface-leitner-interval-tolerance'), which self-balances
+;;      by picking the day which is both close to ideal and lightly loaded
+;;      (`resurface-leitner-workload-weight'), so reviews spread out
+;;      instead of piling up on the same day.
 ;;
 ;; Quick start -- Leitner (whole files):
 ;;   M-x resurface-leitner                  Open the group dashboard
@@ -28,15 +50,14 @@
 ;;   M-x resurface-leitner-start-session    Review all due files (C-u: one group)
 ;;   M-x resurface-leitner-review-graduated Browse graduated files (C-u: one group)
 ;;
-;; Quick start -- Drill (sentences/chunks):
+;; Quick start -- Drill (sentences/chunks, resurface-drill.el):
 ;;   M-x resurface-drill                    Open the drill block dashboard
 ;;   M-x resurface-drill-add-block          Add a new drill block
 ;;   M-x resurface-drill-add-sentence       Add a sentence/chunk to drill
 ;;   M-x resurface-drill-start-session      Drill all due sentences (C-u: one block)
 ;;   M-x resurface-drill-review-retired     Browse retired sentences (C-u: one block)
 ;;
-;; Every mode has a `?' binding for its keymap.  See README.org for the full
-;; review workflow and customisation reference.
+;; Every mode has a `?' binding for its keymap.  See README.org for the full workflow
 ;;
 ;;; Code:
 
@@ -50,20 +71,21 @@
 ;;  Customisation
 
 (defgroup resurface nil
-  "Leitner spaced repetition for note files."
+  "Familiarity-based spaced repetition for note files."
   :group 'applications
   :prefix "leitner-")
 
 (defcustom resurface-index-file
   (expand-file-name "var/resurface.json" user-emacs-directory)
   "Path to the JSON file storing all review metadata.
-Your note files are never touched, so all state lives here."
+Note files are never touched, so all state lives here."
   :type 'file
   :group 'resurface)
 
 (defcustom resurface-leitner-intervals [1 3 7 14 30 60 90]
-  "Review intervals (days) for each Leitner box.
-Index 0 = Box 1 (reviewed most frequently)."
+  "Ideal review interval (days) for each Leitner box.
+These are targets the scheduler aims for, not exact deadlines, see
+`resurface-leitner-interval-tolerance'."
   :type '(vector integer)
   :group 'resurface)
 
@@ -79,50 +101,78 @@ Nil disables the cap every due file is queued"
                   (integer :tag "Max items per session"))
   :group 'resurface)
 
+;; enable things like olivetti, writetoom etc...
 (defcustom resurface-leitner-before-review-hook nil
   "Hook run right after a note file is revealed in a review session.")
 
 (defcustom resurface-leitner-after-session-hook nil
   "Hook run immediately after a review session is fully completed.")
 
+;; ---------------------------------------------------------------------
+;;  Familiarity Scheduler tuning
+
+(defcustom resurface-leitner-history-length 5
+  "Window of number of most recent ratings kept per item.
+Confidence is recomputed from this window, older ratings are
+discarded, so there is nothing further to keep in sync."
+  :type 'integer
+  :group 'resurface)
+
+(defcustom resurface-leitner-weighting 'linear
+  "How much more recent ratings should count than older ones.
+`linear' weights position i of n as i/n.  `exponential' doubles
+the weight each step closer to the present.  `uniform' gives
+every rating in the window equal weight."
+  :type '(choice (const linear) (const exponential) (const uniform))
+  :group 'resurface)
+
+(defcustom resurface-leitner-promote-threshold 0.80
+  "Confidence at or above where an item should be promoted by one box.
+Promoting from the last box graduates the item instead."
+  :type 'float
+  :group 'resurface)
+
+(defcustom resurface-leitner-demote-threshold -0.40
+  "Confidence at or below where an item should be demoted by one box.
+Superseded by `resurface-leitner-reset-threshold' when both apply."
+  :type 'float
+  :group 'resurface)
+
+(defcustom resurface-leitner-reset-threshold -0.80
+  "Confidence at or below where an item is reset straight to Box 1.
+Checked before `resurface-leitner-demote-threshold', so consistent
+unfamiliarity always wins over a milder demotion."
+  :type 'float
+  :group 'resurface)
+
+(defcustom resurface-leitner-interval-tolerance 0.20
+  "Fractional slack allowed around a box's ideal interval, each way.
+0.20 on a 30-day box permits scheduling anywhere from 24 to 36
+days out, whichever balances workload best."
+  :type 'float
+  :group 'resurface)
+
+(defcustom resurface-leitner-workload-weight 0.2
+  "Weight of same-day review load against deviation from the ideal date.
+Spacing cost is normalised to [0, 1] across the tolerance window (see
+`resurface--leitner-choose-next-review'), so this is denominated in
+\"how many extra same-day reviews is drifting all the way to the edge
+of the window worth\": the default 0.2 means about 5 extra reviews on
+a day justify using the full tolerance to avoid it.  Higher values push
+harder toward quiet days; 0 disables workload-awareness entirely."
+  :type 'float
+  :group 'resurface)
+
 ;; ---------------------------------------------------------------------------
-;;  Drill mode (rereading drills, see the Drill Mode section further down)
+;;  Drill mode (optional companion feature, see resurface-drill.el)
 
-(defcustom resurface-drill-intervals '((active . 1) (stabilizing . 4) (maintenance . 14))
-  "Resurfacing interval (days) for each drill mode.
-Unlike `resurface-leitner-intervals', movement between these three modes is
-driven by exposure counts and elapsed time, not by whether you \"got it
-right\", see `resurface-drill-promote-exposures' and
-`resurface-drill-min-days-per-mode'."
-  :type '(alist :key-type symbol :value-type integer)
-  :group 'resurface)
-
-(defcustom resurface-drill-promote-exposures 3
-  "The number of consecutive `clear' outcomes needed.
-To advance a sentence to the next mode: active -> stabilizing -> maintenance ->
-retired.  An `opaque' outcome resets this count back to zero."
-  :type 'integer
-  :group 'resurface)
-
-(defcustom resurface-drill-min-days-per-mode 3
-  "The minimum number of days a sentence must sit in its current mode.
-Before it can be promoted, even once it already has enough
-`clear' exposures.  It stops an easy sentence from graduating on day one."
-  :type 'integer
-  :group 'resurface)
-
-(defcustom resurface-drill-default-block "General"
-  "Default drill block name when none is specified."
-  :type 'string
-  :group 'resurface)
-
-(defcustom resurface-drill-session-max-items nil
-  "Maximum number of sentences to queue in a single drill session.
-Nil disables the cap, every due sentence is queued."
-  :type '(choice (const :tag "No limit" nil)
-                  (integer :tag "Max items per session"))
-  :group 'resurface)
-
+(defcustom resurface-enable-drill-mode nil
+  "Whether to load Drill mode (`resurface-drill.el') alongside Leitner mode."
+  :type 'boolean
+  :group 'resurface
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when val (require 'resurface-drill))))
 
 ;; ===========================================================================
 ;;  Internal State
@@ -131,24 +181,21 @@ Nil disables the cap, every due sentence is queued."
 ;;   HASH-TABLE  : group-name (string) -> group-alist
 ;;   group-alist : ((:name . STRING) (:items . LIST-OF-ITEM-ALISTS))
 ;;   item-alist  : ((:path . STRING) (:box . INT)
-;;                  (:last-reviewed . INT) (:added . INT)
+;;                  (:history . LIST-OF-1-OR-MINUS-1)  ; newest-first, capped
+;;                  (:last-reviewed . INT) (:next-review . INT)
+;;                  (:added . INT)
 ;;                  (:graduated . INT-OR-NIL)   ; Unix ts when graduated
 ;;                  (:paused . BOOL))           ; t after a Partial rating
 ;;
-;; resurface--data  also carries a THIRD top-level key, :drill-blocks, used
-;; by Drill Mode (see that section further down) for rereading short
-;; sentences/chunks rather than whole files:
-;;   HASH-TABLE  : block-id (string) -> block-alist
-;;   block-alist : ((:id . STRING) (:name . STRING) (:items . LIST-OF-ITEMS))
-;;   item-alist  : ((:id . STRING) (:text . STRING) (:note . STRING-OR-NIL)
-;;                  (:mode . SYMBOL)             ; active | stabilizing | maintenance
-;;                  (:exposures . INT)           ; consecutive `clear' outcomes, this mode
-;;                  (:total-exposures . INT)     ; lifetime rep count (clear + opaque), stat only
-;;                  (:mode-entered . INT)        ; Unix ts entering the current mode
-;;                  (:last-drilled . INT) (:added . INT)
-;;                  (:min-sessions . INT)        ; per-item copy of the promote threshold
-;;                  (:retired . INT-OR-NIL))     ; Unix ts when retired
+;; No confidence, momentum, or streak count is ever stored, it is always
+;; recomputed from :history, in `resurface--leitner-confidence'.
 ;;
+;; resurface--data  also carries a THIRD top-level key, :drill-blocks, used
+;; by Drill Mode (`resurface-drill.el', a separate, optional file
+;; `resurface-enable-drill-mode')  this file only touches it as an opaque
+;; hash-table it hands off to resurface-drill.el's own accessors, the
+;; dispatch is in `resurface--data->json-sexp'/`resurface--json-sexp->data'.
+
 (defvar resurface--data nil
   "In-memory Resurface index (Leitner groups + drill blocks).
 Nil until first initialisation.")
@@ -159,102 +206,266 @@ Nil until first initialisation.")
   "Active review session state, or nil when idle.")
 
 
-;; ===========================================================================
+;; ====================================================================
 ;;  Small Utilities
 
 (defun resurface--now ()
   "Return the current time as a Unix timestamp (integer)."
   (floor (float-time)))
 
+(defun resurface--day-number (ts)
+  "Return the epoch-day number containing Unix timestamp TS."
+  (floor ts 86400))
+
 (defun resurface--leitner-num-boxes ()
   "Return the number of Leitner boxes."
   (length resurface-leitner-intervals))
 
 (defun resurface--leitner-box-days (box)
-  "Review interval in days for BOX (1-indexed)."
+  "Ideal review interval in days for BOX (1-indexed)."
   (aref resurface-leitner-intervals (1- box)))
 
-(defun resurface--leitner-box-secs (box)
-  "Review interval in seconds for BOX (1-indexed)."
-  (* (resurface--leitner-box-days box) 86400))
+(defun resurface--format-ts (ts)
+  "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0 or nil."
+  (if (or (null ts) (= ts 0)) "Never"
+    (format-time-string "%Y-%m-%d" (seconds-to-time ts))))
 
-(defun resurface--leitner-item-interval-secs (item)
-  "Effective review interval in seconds for ITEM."
-  (resurface--leitner-box-secs (cdr (assq :box item))))
+(defun resurface--shuffle (seq)
+  "Return a shuffled copy of SEQ using fisher-yates algorithm."
+  (let ((v (vconcat seq)))
+    (dotimes (i (length v))
+      (let ((j (+ i (random (- (length v) i)))))
+        (cl-rotatef (aref v i) (aref v j))))
+    (append v nil)))
 
-(defun resurface--leitner-item-due-p (item)
-  "Return non-nil when ITEM is due for review.
-Graduated items are never due."
-  (and (not (cdr (assq :graduated item)))
-       (let ((lr (cdr (assq :last-reviewed item))))
-         (or (= lr 0)
-             (>= (- (resurface--now) lr) (resurface--leitner-item-interval-secs item))))))
 
-(defun resurface--leitner-item-days-until-due (item)
-  "Days until ITEM is next due.  Negative = overdue, 0 = never reviewed."
-  (let ((lr (cdr (assq :last-reviewed item))))
-    (if (= lr 0) 0
-      (/ (- (resurface--leitner-item-interval-secs item)
-            (- (resurface--now) lr))
-         86400.0))))
+;; ===========================================================================
+;;  The Familiarity Scheduler
+;;
+;; Turns a rolling window of Familiar/Unfamiliar ratings into a confidence
+;; score, decides whether that confidence is enough to move the box
+;; when a review needs a new date, picks the day nearest the box's
+;; ideal interval that isn't already overloaded with other reviews.
+;; Every step is a pure function of the item's stored history
+;; nothing is cached.
+
+(defun resurface--leitner-weight (position n)
+  "Weight of the rating at 1-indexed POSITION out of N (oldest = 1)."
+  (pcase resurface-leitner-weighting
+    ('uniform     1.0)
+    ('exponential (expt 2.0 (1- position)))
+    (_            (/ (float position) n)))) ; linear, the default
+
+(defun resurface--leitner-confidence (history)
+  "Return a confidence score in [-1, +1] for HISTORY, newest first.
+An empty HISTORY (not enough evidence yet) is neutral: 0.0."
+  (if (null history)
+      0.0
+    (let ((n (length history)) (position 0) (wsum 0.0) (rsum 0.0))
+      (dolist (rating (reverse history)) ; walk oldest -> newest
+        (cl-incf position)
+        (let ((w (resurface--leitner-weight position n)))
+          (cl-incf wsum w)
+          (cl-incf rsum (* w rating))))
+      (/ rsum wsum))))
+
+(defun resurface--leitner-push-history (history rating)
+  "Prepend RATING (1 or -1) to HISTORY, capped to `resurface-leitner-history-length'."
+  (seq-take (cons rating history) resurface-leitner-history-length))
+
+(defun resurface--leitner-decide (confidence n old-box last-box)
+  "Return (ACTION . NEW-BOX) for CONFIDENCE at OLD-BOX of LAST-BOX boxes.
+N is how many ratings CONFIDENCE was computed from.  Fewer than
+`resurface-leitner-history-length' means there isn't enough evidence yet
+ACTION is one of `reset', `demote', `promote', `graduate', or `remain'."
+  (if (< n resurface-leitner-history-length)
+      (cons 'remain old-box)
+    (cond
+     ((<= confidence resurface-leitner-reset-threshold)  (cons 'reset 1))
+     ((<= confidence resurface-leitner-demote-threshold)  (cons 'demote (max 1 (1- old-box))))
+     ((>= confidence resurface-leitner-promote-threshold)
+      (if (= old-box last-box) (cons 'graduate old-box) (cons 'promote (1+ old-box))))
+     (t (cons 'remain old-box)))))
+
+(defun resurface--leitner-day-loads (exclude-path)
+  "Hash-table of epoch-day -> number of active items next due that day.
+EXCLUDE-PATH is left out, since it's the item currently being rescheduled."
+  (let ((loads (make-hash-table :test #'eql)))
+    (dolist (pair (resurface--leitner-all-pairs))
+      (let* ((item (cdr pair))
+             (nr   (cdr (assq :next-review item))))
+        (when (and (not (equal (cdr (assq :path item)) exclude-path))
+                   (not (cdr (assq :graduated item)))
+                   nr (> nr 0))
+          (let ((day (resurface--day-number nr)))
+            (puthash day (1+ (or (gethash day loads) 0)) loads)))))
+    loads))
+
+(defun resurface--leitner-choose-next-review (box exclude-path)
+  "Pick a Unix timestamp to next review BOX, balancing spacing and workload.
+Considers every day within `resurface-leitner-interval-tolerance' of the
+box's ideal interval, and returns the ideal day itself when workload
+weighting is disabled or the window collapses to one candidate."
+  (let* ((ideal  (resurface--leitner-box-days box))
+         (slack  (max 0 (round (* ideal resurface-leitner-interval-tolerance))))
+         (lo     (max 1 (- ideal slack)))
+         (hi     (+ ideal slack))
+         (today  (resurface--day-number (resurface--now)))
+         (loads  (resurface--leitner-day-loads exclude-path))
+         best best-cost)
+    (cl-loop for offset from lo to hi do
+      (let* ((day      (+ today offset))
+             (load     (or (gethash day loads) 0))
+             (spacing  (if (> slack 0) (/ (float (- offset ideal)) slack) 0.0))
+             (cost     (+ (* spacing spacing)
+                          (* resurface-leitner-workload-weight load))))
+        (when (or (null best-cost)
+                  (< cost best-cost)
+                  (and (= cost best-cost) best (< (abs (- offset ideal)) (abs (- best ideal)))))
+          (setq best offset best-cost cost))))
+    (* (+ today best) 86400)))
+
+
+;; ===========================================================================
+;;  Item Lifecycle
 
 (defun resurface--leitner-make-item (path)
-  "Return a fresh item-alist for PATH placed in Box 1."
+  "Return a fresh item-alist for PATH placed in Box 1, due immediately."
   (list (cons :path          (expand-file-name path))
         (cons :box           1)
+        (cons :history        nil)
         (cons :last-reviewed 0)
+        (cons :next-review   0)
         (cons :added         (resurface--now))
         (cons :graduated     nil)
         (cons :paused        nil)))
+
+(defun resurface--leitner-build-item (item &rest overrides)
+  "Return a copy of ITEM with OVERRIDES (a :key value plist) applied."
+  (let ((new (copy-alist item)))
+    (while overrides
+      (let ((key (pop overrides)) (val (pop overrides)))
+        (if (assq key new) (setcdr (assq key new) val)
+          (push (cons key val) new))))
+    new))
 
 (defun resurface--leitner-item-graduated-p (item)
   "Return non-nil when ITEM has been graduated (fully mastered)."
   (cdr (assq :graduated item)))
 
 (defun resurface--leitner-item-paused-p (item)
-  "Return non-nil when ITEM was last rated Partial.
-Cleared the next time the item is rated with any other outcome."
+  "Return non-nil when ITEM was last rated Partial."
   (cdr (assq :paused item)))
+
+(defun resurface--leitner-item-due-p (item)
+  "Return non-nil when ITEM is due for review.  Graduated items never are."
+  (and (not (resurface--leitner-item-graduated-p item))
+       (let ((nr (cdr (assq :next-review item))))
+         (or (null nr) (= nr 0) (<= nr (resurface--now))))))
+
+(defun resurface--leitner-item-days-until-due (item)
+  "Days until ITEM is next due.  Negative = overdue, 0 = never reviewed."
+  (let ((nr (cdr (assq :next-review item))))
+    (if (or (null nr) (= nr 0)) 0.0
+      (/ (- nr (resurface--now)) 86400.0))))
+
+(defun resurface--leitner-item-confidence (item)
+  "Return ITEM's current confidence score, recomputed from its history."
+  (resurface--leitner-confidence (cdr (assq :history item))))
+
+(defun resurface--leitner-item-confidence-str (item)
+  "Return a short display string for ITEM's confidence, or \"—\" with no history."
+  (let ((h (cdr (assq :history item))))
+    (if (null h) "—" (format "%+.2f" (resurface--leitner-confidence h)))))
+
+(defun resurface--leitner-item-window-str (item)
+  "Return ITEM's evidence window as \"F U F . .\", oldest to newest."
+  (let* ((filled  (mapcar (lambda (r) (if (> r 0) "F" "U"))
+                          (reverse (cdr (assq :history item)))))
+         (missing (max 0 (- resurface-leitner-history-length (length filled)))))
+    (mapconcat #'identity (append filled (make-list missing "·")) " ")))
+
+(defun resurface--leitner-item-evidence-note (item)
+  "Return a plain-language sentence about ITEM's evidence-window state."
+  (let* ((n    (length (cdr (assq :history item))))
+         (need (- resurface-leitner-history-length n)))
+    (if (> need 0)
+        (format "%d of %d ratings collected, %d more before this can move box"
+                n resurface-leitner-history-length need)
+      (format "%d of %d ratings collected, window full, every review re-evaluates"
+              resurface-leitner-history-length resurface-leitner-history-length))))
+
+(defun resurface--leitner-outcome-label (outcome old-item new-item)
+  "Human-readable line describing what OUTCOME did, from OLD-ITEM to NEW-ITEM.
+This distinguishes three states a rating can leave things in:
+still collecting evidence, a full window that wasn't enough to act on,
+or a threshold that just fired, since all."
+  (pcase outcome
+    ((or 'familiar 'unfamiliar)
+     (let* ((old-box  (cdr (assq :box old-item)))
+            (new-box  (cdr (assq :box new-item)))
+            (grad-now (and (cdr (assq :graduated new-item))
+                           (not (cdr (assq :graduated old-item)))))
+            (n        (length (cdr (assq :history new-item))))
+            (verb     (if (eq outcome 'familiar) "Familiar" "Unfamiliar")))
+       (cond
+        (grad-now (propertize (format "%s -> Graduated! Removed from active queue." verb)
+                              'face 'success))
+        ((/= new-box old-box)
+         (format "%s -> confidence %s crossed the line: Box %d -> %d (evidence window reset)"
+                 verb (resurface--leitner-item-confidence-str new-item) old-box new-box))
+        ((= n resurface-leitner-history-length)
+         (format "%s -> confidence %s (window full), not decisive enough, Box %d unchanged"
+                 verb (resurface--leitner-item-confidence-str new-item) new-box))
+        (t
+         (format "%s -> still building evidence (%d/%d), Box %d unchanged"
+                 verb n resurface-leitner-history-length new-box)))))
+    ('partial (propertize "Paused, due again tomorrow" 'face 'font-lock-doc-face))
+    ('revised (propertize "Revised, box unchanged" 'face 'font-lock-doc-face))
+    ('skip "Skipped")))
 
 (defun resurface--leitner-item-rate (item outcome)
   "Return a NEW item-alist for ITEM rated with OUTCOME.
-OUTCOME is one of `good', `reset' (Bad), `skip', `partial', `revised'.
-`reset' always sends the item back to Box 1."
-  (let* ((old-box (cdr (assq :box item)))
+OUTCOME is `familiar', `unfamiliar', `reset', `skip', `partial' (paused), or
+`revised' (box untouched, but counts as a completed review today)."
+  (let* ((path     (cdr (assq :path item)))
+         (old-box  (cdr (assq :box item)))
          (last-box (resurface--leitner-num-boxes))
-         (graduating (and (eq outcome 'good) (= old-box last-box)))
-         (new-box (pcase outcome
-                    ('good (if graduating last-box (1+ old-box)))
-                    ('reset 1)
-                    ((or 'skip 'partial 'revised) old-box)))
-         ;; partial backdates :last-reviewed so the effective interval is
-         ;; satisfied exactly one day from now
-         (interval (resurface--leitner-item-interval-secs item)))
-    (list (cons :path          (cdr (assq :path item)))
-          (cons :box           new-box)
-          (cons :last-reviewed (cond
-                                 ((eq outcome 'skip)
-                                  (cdr (assq :last-reviewed item)))
-                                 ((eq outcome 'partial)
-                                  (max 0 (- (resurface--now)
-                                            (max 0 (- interval 86400)))))
-                                 (t (resurface--now))))
-          (cons :added         (cdr (assq :added item)))
-          (cons :graduated     (if graduating (resurface--now) nil))
-          (cons :paused        (eq outcome 'partial)))))
+         (now      (resurface--now)))
+    (pcase outcome
+      ((or 'familiar 'unfamiliar)
+       (let* ((history  (resurface--leitner-push-history
+                          (cdr (assq :history item))
+                          (if (eq outcome 'familiar) 1 -1)))
+              (decision (resurface--leitner-decide
+                         (resurface--leitner-confidence history) (length history) old-box last-box))
+              (action   (car decision))
+              (new-box  (cdr decision)))
+         (if (eq action 'graduate)
+             (resurface--leitner-build-item item
+               :last-reviewed now :graduated now :paused nil)
+           (resurface--leitner-build-item item
+             :box          new-box
+             :history      (if (memq action '(promote demote reset)) nil history)
+             :last-reviewed now
+             :graduated    nil
+             :paused       nil
+             :next-review  (resurface--leitner-choose-next-review new-box path)))))
+      ('reset
+       (resurface--leitner-build-item item
+         :box 1 :history nil :graduated nil :paused nil :next-review now))
+      ('skip item)
+      ('partial
+       (resurface--leitner-build-item item
+         :last-reviewed now :paused t :next-review (+ now 86400)))
+      ('revised
+       (resurface--leitner-build-item item
+         :last-reviewed now :paused nil
+         :next-review (resurface--leitner-choose-next-review old-box path))))))
 
-(defun resurface--format-ts (ts)
-  "Format Unix timestamp TS as YYYY-MM-DD, or \"Never\" for 0."
-  (if (= ts 0) "Never"
-    (format-time-string "%Y-%m-%d" (seconds-to-time ts))))
 
-(defun resurface--shuffle (seq)
-  "Return a shuffled copy of SEQ using fisher-yates."
-  (let ((v (vconcat seq)))
-    (dotimes (i (length v))
-      (let ((j (+ i (random (- (length v) i)))))
-        (cl-rotatef (aref v i) (aref v j))))
-    (append v nil)))
+;; ===========================================================================
+;;  Org prompt extraction
 
 (defun resurface--leitner-extract-prompt (path)
   "Scan the first 1000 bytes of PATH for a review prompt.
@@ -291,6 +502,10 @@ so Denote's lowercase #+title: is handled too)."
           (insert-file-contents path)
           (splice)
           (write-region (point-min) (point-max) path nil 'silent))))))
+
+
+;; ===========================================================================
+;;  Groups & Index Accessors
 
 (defun resurface--ensure-data ()
   "Initialise `resurface--data', loading from disk when available."
@@ -333,22 +548,19 @@ so Denote's lowercase #+title: is handled too)."
 (defun resurface--leitner-set-group-items (group-name items)
   "Replace the items list of GROUP-NAME with ITEMS (mutates in-place)."
   (let ((g (gethash group-name (resurface--leitner-groups-ht))))
-    (when g
-      (setcdr (assq :items g) items))))
+    (when g (setcdr (assq :items g) items))))
 
 (defun resurface--leitner-prepend-item (group-name item)
   "Add ITEM to the front of GROUP-NAME's items list."
   (resurface--leitner-get-or-create-group group-name)
   (resurface--leitner-set-group-items
-   group-name
-   (cons item (resurface--leitner-group-items group-name))))
+   group-name (cons item (resurface--leitner-group-items group-name))))
 
 (defun resurface--leitner-replace-item (group-name path new-item)
   "Replace the item with :path = PATH in GROUP-NAME with NEW-ITEM."
   (resurface--leitner-set-group-items
    group-name
-   (mapcar (lambda (it)
-             (if (equal (cdr (assq :path it)) path) new-item it))
+   (mapcar (lambda (it) (if (equal (cdr (assq :path it)) path) new-item it))
            (resurface--leitner-group-items group-name))))
 
 (defun resurface--mark-dirty ()
@@ -380,8 +592,8 @@ so Denote's lowercase #+title: is handled too)."
 
 ;; ranks items only for `resurface-leitner-session-max-items', it has no
 ;; effect on whether something counts as due (`resurface--leitner-item-due-p' alone)
-(defun resurface--leitner-item-overdue-amount (group-name item)
-  "Return how overdue ITEM (in GROUP-NAME) is, in days.
+(defun resurface--leitner-item-overdue-amount (item)
+  "Return how overdue ITEM is, in days.
 Never-reviewed items rank lowest (0.0) here, behind files that sat
 past their interval, they're due, but not yet neglected backlog."
   (max 0.0 (- (resurface--leitner-item-days-until-due item))))
@@ -390,9 +602,8 @@ past their interval, they're due, but not yet neglected backlog."
   "Return the N most overdue of PAIRS (as from `resurface--leitner-due-pairs')."
   (seq-take
    (sort (copy-sequence pairs)
-         (lambda (a b)
-           (> (resurface--leitner-item-overdue-amount (car a) (cdr a))
-              (resurface--leitner-item-overdue-amount (car b) (cdr b)))))
+         (lambda (a b) (> (resurface--leitner-item-overdue-amount (cdr a))
+                          (resurface--leitner-item-overdue-amount (cdr b)))))
    n))
 
 (defun resurface--leitner-graduated-pairs (&optional group-name)
@@ -427,6 +638,7 @@ ACTIVE is any non-graduated items for a group."
             (equal (cdr (assq :path (cdr pair))) abs)))
      (resurface--leitner-all-pairs))))
 
+
 ;; ===========================================================================
 ;;  Persistence
 ;;
@@ -436,9 +648,22 @@ ACTIVE is any non-graduated items for a group."
 
 (defun resurface--empty-data ()
   "Return a fresh, empty index data structure."
-  (list (cons :groups       (make-hash-table :test #'equal))
-        (cons :drill-blocks (make-hash-table :test #'equal))
-        (cons :dirty        nil)))
+  (list (cons :groups           (make-hash-table :test #'equal))
+        (cons :drill-blocks     (make-hash-table :test #'equal))
+        (cons :drill-blocks-raw nil)
+        (cons :dirty            nil)))
+
+(defun resurface--json-safe-alist (val)
+  "Return VAL if it's usable as an alist (a proper list, including nil)."
+  (if (listp val) val nil))
+
+(defun resurface--drill-blocks-json-sexp-for-save ()
+  "Return the JSON sexp to write for the top-level \"drill_blocks\" key.
+When `resurface-drill.el' is loaded, this serialises the live, in-memory
+hash-table (`resurface--drill-blocks->json-sexp'), same as always."
+  (if (fboundp 'resurface--drill-blocks->json-sexp)
+      (resurface--drill-blocks->json-sexp)
+    (cdr (assq :drill-blocks-raw resurface--data))))
 
 (defun resurface--data->json-sexp ()
   "Convert `resurface--data' to a JSON-encodable sexp."
@@ -452,26 +677,25 @@ ACTIVE is any non-graduated items for a group."
                  (lambda (item)
                    (list (cons 'path          (cdr (assq :path item)))
                          (cons 'box           (cdr (assq :box  item)))
+                         (cons 'history       (vconcat (cdr (assq :history item))))
                          (cons 'last_reviewed (cdr (assq :last-reviewed item)))
+                         (cons 'next_review   (or (cdr (assq :next-review item)) 0))
                          (cons 'added         (cdr (assq :added item)))
-                         (cons 'graduated     (or (cdr (assq :graduated item))
-                                                  :json-false))
-                         (cons 'paused        (if (cdr (assq :paused item))
-                                                  t :json-false))))
+                         (cons 'graduated     (or (cdr (assq :graduated item)) :json-false))
+                         (cons 'paused        (if (cdr (assq :paused item)) t :json-false))))
                  items))))
-             (push (cons gname (list (cons 'name  gname)
-                                     (cons 'items encoded-items)))
-                   groups-list)))
+         (push (cons gname (list (cons 'name  gname) (cons 'items encoded-items)))
+               groups-list)))
      (resurface--leitner-groups-ht))
-    (list (cons 'version       2)
+    (list (cons 'version       3)
           (cons 'box_intervals resurface-leitner-intervals)
           (cons 'groups        groups-list)
-          (cons 'drill_blocks  (resurface--drill-blocks->json-sexp)))))
+          (cons 'drill_blocks  (resurface--drill-blocks-json-sexp-for-save)))))
 
 (defun resurface--json-sexp->data (sexp)
   "Parse SEXP (from `json-read' with string keys) into internal data."
   (let ((ht (make-hash-table :test #'equal)))
-    (dolist (group-pair (cdr (assoc "groups" sexp)))
+    (dolist (group-pair (resurface--json-safe-alist (cdr (assoc "groups" sexp))))
       (let* ((gname      (car group-pair))
              (gdata      (cdr group-pair))
              (raw-items  (cdr (assoc "items" gdata)))
@@ -479,26 +703,37 @@ ACTIVE is any non-graduated items for a group."
              (items
               (mapcar
                (lambda (raw)
-                 (let ((grad   (cdr (assoc "graduated" raw)))
-                       (paused (cdr (assoc "paused" raw))))
-                   ;; JSON false/null both come back as nil, Legacy "question" field
-                   ;; is intentionally ignored, prompts are read live via `resurface--leitner-extract-prompt'
-                   (list (cons :path          (cdr (assoc "path"          raw)))
-                         (cons :box           (cdr (assoc "box"           raw)))
-                         (cons :last-reviewed (cdr (assoc "last_reviewed" raw)))
-                         (cons :added         (cdr (assoc "added"         raw)))
-                         (cons :graduated     (if (or (null grad)
-                                                      (eq grad :json-false))
-                                                  nil grad))
-                         (cons :paused        (and paused
-                                                    (not (eq paused :json-false)))))))
+                 (let* ((grad    (cdr (assoc "graduated" raw)))
+                        (paused  (cdr (assoc "paused" raw)))
+                        (box     (cdr (assoc "box" raw)))
+                        (lr      (or (cdr (assoc "last_reviewed" raw)) 0))
+                        (raw-nr  (assoc "next_review" raw))
+                        (nr      (cond (raw-nr (cdr raw-nr))
+                                        ((= lr 0) 0)
+                                        (t (+ lr (* 86400 (resurface--leitner-box-days
+                                                            (min box (resurface--leitner-num-boxes))))))))
+                        (raw-h   (cdr (assoc "history" raw))))
+                   ;; JSON false/null both come back as nil.  Legacy "question"
+                   ;; field is ignored, prompts are read live via `resurface--leitner-extract-prompt'.
+                   (list (cons :path          (cdr (assoc "path" raw)))
+                         (cons :box           box)
+                         (cons :history       (if (vectorp raw-h) (append raw-h nil) nil))
+                         (cons :last-reviewed lr)
+                         (cons :next-review   nr)
+                         (cons :added         (cdr (assoc "added" raw)))
+                         (cons :graduated     (if (or (null grad) (eq grad :json-false)) nil grad))
+                         (cons :paused        (and paused (not (eq paused :json-false)))))))
                items-list)))
-        (puthash gname
-                 (list (cons :name  gname)
-                       (cons :items items))
-                 ht)))
+        (puthash gname (list (cons :name gname) (cons :items items)) ht)))
     (list (cons :groups       ht)
-          (cons :drill-blocks (resurface--json-sexp->drill-blocks-ht sexp))
+          ;; parse "drill_blocks" into a real hash-table if drill blocks loaded
+          ;; otherwise stash the raw sexp untouched under :drill-blocks-raw
+          ;; drill rebuilds the real hash-table from it `resurface--drill-blocks-sync-after-load'.
+          (cons :drill-blocks (if (fboundp 'resurface--json-sexp->drill-blocks-ht)
+                                   (resurface--json-sexp->drill-blocks-ht sexp)
+                                 (make-hash-table :test #'equal)))
+          (cons :drill-blocks-raw (unless (fboundp 'resurface--json-sexp->drill-blocks-ht)
+                                     (cdr (assoc "drill_blocks" sexp))))
           (cons :dirty        nil))))
 
 ;;;###autoload
@@ -541,15 +776,10 @@ ACTIVE is any non-graduated items for a group."
             (when (and resurface--data (cdr (assq :dirty resurface--data)))
               (resurface-save))))
 
-(defun resurface--leitner-all-tracked-paths ()
-  "Return a list of all absolute paths currently in the index."
-  (let (paths)
-    (maphash (lambda (gname _g)
-               (dolist (item (resurface--leitner-group-items gname))
-                 (push (cdr (assq :path item)) paths)))
-             (resurface--leitner-groups-ht))
-    paths))
 
+;; ===========================================================================
+;;  Healthcheck
+;;
 ;; for each missing file: [r]emap prompts for its new location (keeps all
 ;; SR history), [p]rune removes the entry, [s]kip leaves it stale for now
 ;; nothing is written until the interactive pass is complete
@@ -590,6 +820,7 @@ ACTIVE is any non-graduated items for a group."
           (resurface--persist))
         (message "Leitner healthcheck: %d remapped, %d pruned, %d skipped."
                  remapped pruned skipped)))))
+
 
 ;; ===========================================================================
 ;;  Adding / Removing / Resetting Files
@@ -684,6 +915,7 @@ a single group; folders and already-registered files are skipped."
     (message "Leitner: group '%s' created." name)
     (resurface--leitner-maybe-refresh-dashboard)))
 
+
 ;; ===========================================================================
 ;;  Review Session
 ;;
@@ -744,7 +976,7 @@ With an optional prefix argument, prompt to limit review to one GROUP-NAME."
           (resurface--leitner-show-front-card pair))))))
 
 (defun resurface--leitner-session-record (outcome)
-  "Record OUTCOME (good/reset/partial/skip/revised) for the current item and advance."
+  "Record OUTCOME (familiar/unfamiliar/partial/skip/revised) and advance."
   (unless resurface--leitner-session
     (user-error "Leitner: no active session"))
   (let* ((queue    (cdr (assq :queue resurface--leitner-session)))
@@ -758,22 +990,10 @@ With an optional prefix argument, prompt to limit review to one GROUP-NAME."
     (setcdr (assq :queue resurface--leitner-session) (cdr queue))
     (when resurface-leitner-review-minor-mode
       (resurface-leitner-review-minor-mode -1))
-    (let* ((grad-p (cdr (assq :graduated new-item)))
-           (label  (pcase outcome
-                     ('good (if grad-p
-                               (propertize "Graduated! Removed from active queue."
-                                           'face 'success)
-                             (format "Good -> Box %d" (cdr (assq :box new-item)))))
-                     ('reset  "Bad -> Box 1")
-                     ('partial (propertize "Paused, due again tomorrow"
-                                           'face 'font-lock-doc-face))
-                     ('revised (propertize "Revised, box unchanged"
-                                           'face 'font-lock-doc-face))
-                     ('skip "Skipped"))))
-      (message "Leitner: %s  (%d / %d done)"
-               label
-               (cdr (assq :reviewed resurface--leitner-session))
-               (cdr (assq :total    resurface--leitner-session))))
+    (message "Leitner: %s  (%d / %d done)"
+             (resurface--leitner-outcome-label outcome item new-item)
+             (cdr (assq :reviewed resurface--leitner-session))
+             (cdr (assq :total    resurface--leitner-session)))
     (resurface--leitner-session-advance)))
 
 (defun resurface--leitner-session-finish ()
@@ -787,6 +1007,7 @@ how many files are still due so the remaining backlog stays visible."
     (setq resurface--leitner-session nil)
     (resurface-save)
     (resurface--leitner-maybe-refresh-dashboard)
+    (run-hooks 'resurface-leitner-after-session-hook)
     (if (and capped (> remaining 0))
         (message "Leitner: session complete, %d file%s reviewed.  %d more due file%s waiting, run `resurface-leitner-start-session' again when you're ready. Index saved."
                  n (if (= n 1) "" "s")
@@ -794,8 +1015,9 @@ how many files are still due so the remaining backlog stays visible."
       (message "Leitner: session complete, %d file%s reviewed. Index saved."
                 n (if (= n 1) "" "s")))))
 
+
 ;; ===========================================================================
-;;  Front Card: recall before reveal
+;;  Front Card: a pause before revealing
 
 (defconst resurface--leitner-front-buf "*Resurface: Leitner Review*"
   "Name of the front-card buffer shown before revealing the file.")
@@ -827,6 +1049,8 @@ how many files are still due so the remaining backlog stays visible."
          (total    (cdr (assq :total    resurface--leitner-session)))
          (fname    (file-name-sans-extension (file-name-nondirectory path)))
          (interval (resurface--leitner-box-days box))
+         (window   (resurface--leitner-item-window-str item))
+         (evidence (resurface--leitner-item-evidence-note item))
          (buf      (get-buffer-create resurface--leitner-front-buf)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -834,8 +1058,6 @@ how many files are still due so the remaining backlog stays visible."
         (resurface-leitner-front-mode)
         (setq resurface--leitner-front-item  item
               resurface--leitner-front-group gname)
-        ;; Layout: header bar / meta / blank / concept name (big, centred) /
-        ;; blank / prompt lines / key hints.
         (cl-flet ((ins (str &optional face)
                     (insert (if face (propertize str 'face face) str))))
           (let* ((width   (max 50 (- (window-width) 4)))
@@ -845,9 +1067,12 @@ how many files are still due so the remaining backlog stays visible."
             (ins rule 'shadow)
             (ins "\n")
             (ins (format "  Group:          %s\n" gname))
-            (ins (format "  Box:            %d  (every %d day%s)\n"
+            (ins (format "  Box:            %d  (ideal ~%d day%s)\n"
                          box interval (if (= interval 1) "" "s")))
             (ins (format "  Last reviewed:  %s\n" (resurface--format-ts lr)))
+            (ins (format "  Confidence:     %s\n" (resurface--leitner-item-confidence-str item)))
+            (ins (format "  Evidence:       [%s]\n" window))
+            (ins (format "                  %s\n" evidence) 'shadow)
             (ins "\n\n")
             (ins (concat "  " fname) '(:weight bold :height 1.2))
             (ins "\n\n\n")
@@ -856,8 +1081,9 @@ how many files are still due so the remaining backlog stays visible."
               (when (and prompt (not (string-empty-p prompt)))
                 (ins "  Prompt / Question:\n" 'shadow)
                 (ins (format "  %s\n\n\n" prompt) '(:weight bold :height 1.1))))
-            (ins "  Recall from memory before revealing.\n" '(:slant italic))
+            (ins "  Take a moment to notice what you remember before rereading.\n" '(:slant italic))
             (ins "  When ready, press SPC to open your notes.\n" '(:slant italic))
+            (ins "\n")
             (ins "\n")
             (ins rule 'shadow)
             (ins "  [SPC] Reveal     [s] Skip     [q] Quit\n" 'shadow)))
@@ -877,7 +1103,8 @@ how many files are still due so the remaining backlog stays visible."
     (setq-local resurface--leitner-review-item  item)
     (setq-local resurface--leitner-review-group gname)
     (resurface-leitner-review-minor-mode 1)
-    (kill-buffer fc)))
+    (kill-buffer fc)
+    (run-hooks 'resurface-leitner-before-review-hook)))
 
 (defun resurface-leitner-front-skip ()
   "Skip the current front card without revealing."
@@ -909,6 +1136,7 @@ how many files are still due so the remaining backlog stays visible."
   (interactive)
   (message "Leitner front: [SPC] Reveal   [s] Skip   [q] Quit"))
 
+
 ;; ===========================================================================
 ;;  Review Minor Mode: rating from within the note file
 
@@ -917,8 +1145,8 @@ how many files are still due so the remaining backlog stays visible."
 
 (defvar resurface-leitner-review-minor-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c l g") #'resurface-leitner-rate-good)
-    (define-key map (kbd "C-c l b") #'resurface-leitner-rate-bad)
+    (define-key map (kbd "C-c l f") #'resurface-leitner-rate-familiar)
+    (define-key map (kbd "C-c l u") #'resurface-leitner-rate-unfamiliar)
     (define-key map (kbd "C-c l p") #'resurface-leitner-rate-partial)
     (define-key map (kbd "C-c l r") #'resurface-leitner-rate-revised)
     (define-key map (kbd "C-c l s") #'resurface-leitner-rate-skip)
@@ -930,7 +1158,7 @@ how many files are still due so the remaining backlog stays visible."
 (define-minor-mode resurface-leitner-review-minor-mode
   "Active while a note file is open for review.
 The file is fully editable, so you can revise freely and rate your
-recall when done."
+familiarity with it when done."
   :lighter " Resurface-Leitner"
   :keymap resurface-leitner-review-minor-mode-map
   (if resurface-leitner-review-minor-mode
@@ -944,14 +1172,15 @@ recall when done."
   "Construct the header-line string for the file currently under review."
   (when (and resurface--leitner-review-item resurface--leitner-session)
     (let ((box      (cdr (assq :box resurface--leitner-review-item)))
+          (conf     (resurface--leitner-item-confidence-str resurface--leitner-review-item))
+          (window   (resurface--leitner-item-window-str resurface--leitner-review-item))
           (reviewed (cdr (assq :reviewed resurface--leitner-session)))
           (total    (cdr (assq :total    resurface--leitner-session))))
       (concat
        (propertize (format " LEITNER  %d/%d " (1+ reviewed) total) 'face '(:weight bold))
        (propertize (format "  %s" resurface--leitner-review-group) 'face 'mode-line)
-       (propertize (format "  Box %d " box)
-                   'face '(:slant italic))
-       (propertize "    C-c l g Good   C-c l b Bad   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit"
+       (propertize (format "  Box %d  Conf %s  [%s] " box conf window) 'face '(:slant italic))
+       (propertize "    C-c l f Familiar   C-c l u Unfamiliar   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit"
                    'face '(:inherit shadow))))))
 
 (defun resurface--leitner-on-review-buffer-kill ()
@@ -960,16 +1189,20 @@ recall when done."
     (message "Leitner: review buffer killed -- use M-x resurface-leitner-start-session to resume.")))
 
 ;;;###autoload
-(defun resurface-leitner-rate-good ()
-  "Rate current review item GOOD (move up one box)."
+(defun resurface-leitner-rate-familiar ()
+  "Rate current review item FAMILIAR.
+Feeds the confidence engine; only enough consecutive Familiar evidence
+promotes the box, see \"The Familiarity Scheduler\" in the Commentary."
   (interactive)
-  (resurface--leitner-session-record 'good))
+  (resurface--leitner-session-record 'familiar))
 
 ;;;###autoload
-(defun resurface-leitner-rate-bad ()
-  "Rate current review item BAD (reset straight to Box 1)."
+(defun resurface-leitner-rate-unfamiliar ()
+  "Rate current review item UNFAMILIAR.
+Feeds the confidence engine, only sustained Unfamiliar evidence demotes
+or resets the box, a single rating never does."
   (interactive)
-  (resurface--leitner-session-record 'reset))
+  (resurface--leitner-session-record 'unfamiliar))
 
 ;;;###autoload
 (defun resurface-leitner-rate-partial ()
@@ -988,7 +1221,7 @@ returns on its normal box interval, new content and all."
 
 ;;;###autoload
 (defun resurface-leitner-rate-skip ()
-  "Skip current review item (keep its box)."
+  "Skip current review item (keep its box and history)."
   (interactive)
   (resurface--leitner-session-record 'skip))
 
@@ -1006,7 +1239,8 @@ returns on its normal box interval, new content and all."
 (defun resurface-leitner-review-help ()
   "Echo review keybindings in minibuffer."
   (interactive)
-  (message "Leitner: C-c l g Good   C-c l b Bad   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
+  (message "Leitner: C-c l f Familiar   C-c l u Unfamiliar   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
+
 
 ;; ===========================================================================
 ;;  Dashboard, main entry point showing each group
@@ -1162,6 +1396,7 @@ returns on its normal box interval, new content and all."
       (with-current-buffer buf
         (tabulated-list-print t)))))
 
+
 ;; ===========================================================================
 ;;  Group Detail View  (file list + status for one group)
 
@@ -1185,21 +1420,26 @@ returns on its normal box interval, new content and all."
   (tabulated-list-init-header))
 
 (defun resurface--leitner-gv-column-format ()
-  "Return the column format vector for the group detail view."
-  [("File"          36 t)
-   ("Box"            5 t)
-   ("Last Reviewed" 14 t)
-   ("Due in"        10 nil)
-   ("Due?"           5 nil)])
+  "Return the column format vector for the group detail view.
+The Window columns width tracks `resurface-leitner-history-length' so
+it never truncates."
+  (vector
+   '("File"          32 t)
+   '("Box"            5 t)
+   '("Conf"            6 t)
+   (list "Window" (+ 4 (* 2 resurface-leitner-history-length)) t)
+   '("Last Reviewed" 14 t)
+   '("Due in"        10 nil)
+   '("Due?"           5 nil)))
 
 (defun resurface--leitner-gv-build-header (group-name)
   "Build the header-line string for the GROUP-NAME detail view."
-  (let* ((items  (resurface--leitner-group-items group-name))
-         (n      (length items))
-         (grad   (length (seq-filter #'resurface--leitner-item-graduated-p items)))
-         (active (- n grad))
-         (due    (length (seq-filter #'resurface--leitner-item-due-p items)))
-         (paused (length (seq-filter #'resurface--leitner-item-paused-p items))))
+  (let* ((items    (resurface--leitner-group-items group-name))
+         (n        (length items))
+         (grad     (length (seq-filter #'resurface--leitner-item-graduated-p items)))
+         (active   (- n grad))
+         (due      (length (seq-filter #'resurface--leitner-item-due-p items)))
+         (paused   (length (seq-filter #'resurface--leitner-item-paused-p items))))
     (propertize
      (format "  %s   |   %d active  %d graduated   |   %d due%s   |   RET open  r reset  d remove  a add  q close"
              group-name active grad due
@@ -1222,6 +1462,8 @@ returns on its normal box interval, new content and all."
             (paused (resurface--leitner-item-paused-p item))
             (due-p  (resurface--leitner-item-due-p item))
             (days   (resurface--leitner-item-days-until-due item))
+            (conf   (resurface--leitner-item-confidence-str item))
+            (window (resurface--leitner-item-window-str item))
             (due-str
              (cond (grad       (propertize "—"       'face 'shadow))
                    ((= lr 0)   (propertize "new"     'face 'warning))
@@ -1239,6 +1481,8 @@ returns on its normal box interval, new content and all."
               (file-name-nondirectory path)
               (if grad (propertize (number-to-string box) 'face 'shadow)
                 (number-to-string box))
+              conf
+              window
               (resurface--format-ts lr)
               due-str
               status)))
@@ -1302,8 +1546,8 @@ returns on its normal box interval, new content and all."
                             "Reactivate '%s' and reset to Box 1? "
                           "Reset '%s' to Box 1? ")
                         (file-name-nondirectory path))))
-      ;; 'reset is the only outcome that both forces Box 1 *and* clears
-      ;; :graduated, there is no separate 'bad outcome.
+      ;; This is the explicit "reset" action, not a rating, it always
+      ;; forces Box 1, clears :graduated, and clears the confidence history
       (resurface--leitner-replace-item gname path (resurface--leitner-item-rate item 'reset))
       (resurface--persist)
       (resurface--leitner-gv-refresh gname)
@@ -1320,6 +1564,7 @@ returns on its normal box interval, new content and all."
   "Echo group-detail keybindings."
   (interactive)
   (message "Leitner group: RET open   r reset   d remove   a add   q close"))
+
 
 ;; ===========================================================================
 ;;  Graduated Browser
@@ -1414,9 +1659,7 @@ every group.  Press r on a file to send it back to Box 1."
     (when id (find-file (cdr id)))))
 
 (defun resurface-leitner-grad-bring-back ()
-  "Send the graduated file under point back to Box 1.
-Same as rating it Reset from a normal review: box resets to 1, the
-graduated flag clears."
+  "Send the graduated file under point back to Box 1 (explicit reset, always Box 1)."
   (interactive)
   (let* ((id    (tabulated-list-get-id))
          (gname (car id))
@@ -1437,974 +1680,6 @@ graduated flag clears."
 
 
 ;; ===========================================================================
-;;  Drill Mode: rereading drills (no recall grading)
-;;
-;;  Drill Data Accessors
-
-(defun resurface--drill-blocks-ht ()
-  "Return the drill-blocks hash-table."
-  (cdr (assq :drill-blocks resurface--data)))
-
-(defun resurface--drill-block-names ()
-  "Return a sorted list of all drill block names.
-the hash-table itself is keyed by block *id* (so a block stays
-identifiable even if renamed later)."
-  (sort (mapcar (lambda (b) (cdr (assq :name b)))
-                (hash-table-values (resurface--drill-blocks-ht)))
-        #'string<))
-
-(defun resurface--drill-new-id ()
-  "Return a fresh, reasonably unique id string."
-  (format "%d-%04d" (resurface--now) (random 10000)))
-
-(defun resurface--drill-get-block (block-id)
-  "Return the block-alist for BLOCK-ID, or nil."
-  (gethash block-id (resurface--drill-blocks-ht)))
-
-(defun resurface--drill-get-block-by-name (name)
-  "Return the block-alist whose :name is NAME, or nil."
-  (seq-find (lambda (b) (equal (cdr (assq :name b)) name))
-            (hash-table-values (resurface--drill-blocks-ht))))
-
-(defun resurface--drill-get-or-create-block (name)
-  "Return the block-alist for NAME, creating a fresh block if needed."
-  (or (resurface--drill-get-block-by-name name)
-      (let* ((id (resurface--drill-new-id))
-             (b  (list (cons :id id) (cons :name name) (cons :items nil))))
-        (puthash id b (resurface--drill-blocks-ht))
-        b)))
-
-(defun resurface--drill-block-items (block-id)
-  "Return the items list for BLOCK-ID (may be nil)."
-  (cdr (assq :items (resurface--drill-get-block block-id))))
-
-;; setcdr+assq mutates in-place, same trick as `resurface--leitner-set-group-items'
-(defun resurface--drill-set-block-items (block-id items)
-  "Replace the items list of BLOCK-ID with ITEMS (mutates in-place)."
-  (let ((b (gethash block-id (resurface--drill-blocks-ht))))
-    (when b (setcdr (assq :items b) items))))
-
-(defun resurface--drill-find-item (block-id item-id)
-  "Return the item in BLOCK-ID with :id ITEM-ID, or nil."
-  (seq-find (lambda (it) (equal (cdr (assq :id it)) item-id))
-            (resurface--drill-block-items block-id)))
-
-(defun resurface--drill-prepend-item (block-id item)
-  "Add ITEM to the front of BLOCK-ID's items list."
-  (resurface--drill-set-block-items
-   block-id (cons item (resurface--drill-block-items block-id))))
-
-(defun resurface--drill-replace-item (block-id item-id new-item)
-  "Replace the item with :id = ITEM-ID in BLOCK-ID with NEW-ITEM."
-  (resurface--drill-set-block-items
-   block-id
-   (mapcar (lambda (it) (if (equal (cdr (assq :id it)) item-id) new-item it))
-           (resurface--drill-block-items block-id))))
-
-(defun resurface--drill-all-pairs ()
-  "All (block-id . item-alist) pairs across every drill block."
-  (let (result)
-    (maphash (lambda (bid b)
-               (dolist (item (cdr (assq :items b)))
-                 (push (cons bid item) result)))
-             (resurface--drill-blocks-ht))
-    result))
-
-(defun resurface--drill-item-retired-p (item)
-  "Return non-nil when ITEM has been retired (fully mastered)."
-  (cdr (assq :retired item)))
-
-(defun resurface--drill-item-interval-secs (item)
-  "Effective resurfacing interval in seconds for ITEM, from its :mode."
-  (* 86400 (or (cdr (assq (cdr (assq :mode item)) resurface-drill-intervals)) 1)))
-
-(defun resurface--drill-item-due-p (item)
-  "Return non-nil when ITEM is due for a drill pass.  Retired items never are."
-  (and (not (resurface--drill-item-retired-p item))
-       (let ((lr (cdr (assq :last-drilled item))))
-         (or (= lr 0)
-             (>= (- (resurface--now) lr) (resurface--drill-item-interval-secs item))))))
-
-(defun resurface--drill-item-days-until-due (item)
-  "Days until ITEM is next due.  Negative = overdue, 0 = never drilled."
-  (let ((lr (cdr (assq :last-drilled item))))
-    (if (= lr 0) 0
-      (/ (- (resurface--drill-item-interval-secs item) (- (resurface--now) lr))
-         86400.0))))
-
-(defun resurface--drill-item-overdue-amount (item)
-  "How overdue ITEM is, in days.  Used only for session-cap trimming."
-  (max 0.0 (- (resurface--drill-item-days-until-due item))))
-
-(defun resurface--drill-top-overdue-pairs (pairs n)
-  "Return the N most overdue of PAIRS (as from `resurface--drill-due-pairs')."
-  (seq-take
-   (sort (copy-sequence pairs)
-         (lambda (a b) (> (resurface--drill-item-overdue-amount (cdr a))
-                           (resurface--drill-item-overdue-amount (cdr b)))))
-   n))
-
-(defun resurface--drill-due-pairs (&optional block-name)
-  "Due (block-id . item-alist) pairs, optionally filtered to BLOCK-NAME."
-  (let ((bid (and block-name (cdr (assq :id (resurface--drill-get-block-by-name block-name))))))
-    (seq-filter
-     (lambda (pair)
-       (and (or (null block-name) (equal (car pair) bid))
-            (resurface--drill-item-due-p (cdr pair))))
-     (resurface--drill-all-pairs))))
-
-(defun resurface--drill-retired-pairs (&optional block-name)
-  "Retired (block-id . item-alist) pairs, optionally filtered to BLOCK-NAME."
-  (let ((bid (and block-name (cdr (assq :id (resurface--drill-get-block-by-name block-name))))))
-    (seq-filter
-     (lambda (pair)
-       (and (or (null block-name) (equal (car pair) bid))
-            (resurface--drill-item-retired-p (cdr pair))))
-     (resurface--drill-all-pairs))))
-
-(defun resurface--drill-mode-label (mode)
-  "Human-readable label for drill MODE."
-  (pcase mode
-    ('active      "Active")
-    ('stabilizing "Stabilizing")
-    ('maintenance "Maintenance")
-    (_            "?")))
-
-(defun resurface--drill-next-mode (mode)
-  "The mode after MODE on the promotion ladder, or nil at the top (retire)."
-  (pcase mode
-    ('active      'stabilizing)
-    ('stabilizing 'maintenance)
-    ('maintenance nil)))
-
-(defun resurface--drill-truncate (text n)
-  "Truncate TEXT to at most N characters, appending an ellipsis if cut."
-  (if (> (length text) n) (concat (substring text 0 (max 0 (1- n))) "...") text))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Item Lifecycle
-
-(defun resurface--drill-make-item (text &optional note)
-  "Return a fresh drill item-alist for TEXT (and optional NOTE), Active mode."
-  (let ((now (resurface--now)))
-    (list (cons :id             (resurface--drill-new-id))
-          (cons :text            (string-trim text))
-          (cons :note             (and note (not (string-empty-p note)) note))
-          (cons :mode              'active)
-          (cons :exposures         0)
-          (cons :total-exposures   0)
-          (cons :mode-entered      now)
-          (cons :last-drilled      0)
-          (cons :added             now)
-          (cons :min-sessions      resurface-drill-promote-exposures)
-          (cons :retired           nil))))
-
-(defun resurface--drill-item-reactivate (item)
-  "Return a copy of ITEM reset to `active' mode, cleared of :retired.
-Used both when manually reactivating a retired sentence, and as the
-demotion target when a `maintenance' item comes back `opaque'."
-  (list (cons :id               (cdr (assq :id item)))
-        (cons :text              (cdr (assq :text item)))
-        (cons :note              (cdr (assq :note item)))
-        (cons :mode               'active)
-        (cons :exposures          0)
-        (cons :total-exposures    (cdr (assq :total-exposures item)))
-        (cons :mode-entered       (resurface--now))
-        (cons :last-drilled       0)
-        (cons :added              (cdr (assq :added item)))
-        (cons :min-sessions       (cdr (assq :min-sessions item)))
-        (cons :retired            nil)))
-
-(defun resurface--drill-item-rate (item outcome)
-  "Return a NEW drill item-alist for ITEM rated with OUTCOME.
-OUTCOME is one of `clear' (this pass felt smooth), `opaque' (still
-needs work), `retire' (force-retire right now), or `skip' (leave the
-item untouched)."
-  (let* ((mode             (cdr (assq :mode            item)))
-         (exposures        (cdr (assq :exposures        item)))
-         (total            (cdr (assq :total-exposures  item)))
-         (mode-entered     (cdr (assq :mode-entered      item)))
-         (min-sessions     (cdr (assq :min-sessions      item)))
-         (now              (resurface--now))
-         (new-mode         mode)
-         (new-exposures    exposures)
-         (new-mode-entered mode-entered)
-         (new-last-drilled (cdr (assq :last-drilled item)))
-         (new-retired      (cdr (assq :retired item)))
-         (bump-total       (not (memq outcome '(skip retire)))))
-    (pcase outcome
-      ('retire (setq new-retired now))
-      ('opaque
-       (let* ((demote        (eq mode 'maintenance))
-              (m2            (if demote 'active mode))
-              (interval-secs (* 86400 (or (cdr (assq m2 resurface-drill-intervals)) 1))))
-         (setq new-mode         m2
-               new-exposures    0
-               new-mode-entered (if demote now mode-entered)
-               ;; always resurface tomorrow, regardless of the mode
-               new-last-drilled (max 0 (- now (max 0 (- interval-secs 86400)))))))
-      ('clear
-       (let* ((tentative    (1+ exposures))
-              (days-in-mode (/ (- now mode-entered) 86400.0))
-              (ready        (and (>= tentative min-sessions)
-                                  (>= days-in-mode resurface-drill-min-days-per-mode)))
-              (next         (and ready (resurface--drill-next-mode mode))))
-         (setq new-last-drilled now)
-         (cond
-          ((and ready (eq mode 'maintenance)) (setq new-retired now))
-          (next (setq new-mode next new-exposures 0 new-mode-entered now))
-          (t    (setq new-exposures tentative)))))
-      ('skip nil))
-    (list (cons :id               (cdr (assq :id item)))
-          (cons :text              (cdr (assq :text item)))
-          (cons :note              (cdr (assq :note item)))
-          (cons :mode              new-mode)
-          (cons :exposures         new-exposures)
-          (cons :total-exposures   (if bump-total (1+ total) total))
-          (cons :mode-entered      new-mode-entered)
-          (cons :last-drilled      new-last-drilled)
-          (cons :added             (cdr (assq :added item)))
-          (cons :min-sessions      min-sessions)
-          (cons :retired           new-retired))))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Persistence (folded into the main resurface--data JSON blob)
-
-(defun resurface--drill-blocks->json-sexp ()
-  "Convert the :drill-blocks hash-table to a JSON-encodable sexp."
-  (let (blocks-list)
-    (maphash
-     (lambda (bid b)
-       (let* ((items (cdr (assq :items b)))
-              (encoded
-               (vconcat
-                (mapcar
-                 (lambda (item)
-                   (list (cons 'id              (cdr (assq :id item)))
-                         (cons 'text             (cdr (assq :text item)))
-                         (cons 'note             (or (cdr (assq :note item)) :json-false))
-                         (cons 'mode             (symbol-name (cdr (assq :mode item))))
-                         (cons 'exposures        (cdr (assq :exposures item)))
-                         (cons 'total_exposures  (cdr (assq :total-exposures item)))
-                         (cons 'mode_entered     (cdr (assq :mode-entered item)))
-                         (cons 'last_drilled     (cdr (assq :last-drilled item)))
-                         (cons 'added            (cdr (assq :added item)))
-                         (cons 'min_sessions     (cdr (assq :min-sessions item)))
-                         (cons 'retired          (or (cdr (assq :retired item)) :json-false))))
-                 items))))
-         (push (cons bid (list (cons 'id bid) (cons 'name (cdr (assq :name b)))
-                               (cons 'items encoded)))
-               blocks-list)))
-     (resurface--drill-blocks-ht))
-    blocks-list))
-
-(defun resurface--json-sexp->drill-blocks-ht (sexp)
-  "Parse the drill_blocks portion of the full index SEXP into a hash-table.
-Missing or absent \"drill_blocks\" (older index files) yields an empty
-table, so loading a pre-drill-mode index just starts with zero blocks."
-  (let ((ht (make-hash-table :test #'equal)))
-    (dolist (block-pair (cdr (assoc "drill_blocks" sexp)))
-      (let* ((bid        (car block-pair))
-             (bdata      (cdr block-pair))
-             (name       (cdr (assoc "name" bdata)))
-             (raw-items  (cdr (assoc "items" bdata)))
-             (items-list (if (vectorp raw-items) (append raw-items nil) nil))
-             (items
-              (mapcar
-               (lambda (raw)
-                 (let ((note    (cdr (assoc "note" raw)))
-                       (retired (cdr (assoc "retired" raw))))
-                   (list (cons :id               (cdr (assoc "id" raw)))
-                         (cons :text              (cdr (assoc "text" raw)))
-                         (cons :note              (if (or (null note) (eq note :json-false)) nil note))
-                         (cons :mode              (intern (cdr (assoc "mode" raw))))
-                         (cons :exposures         (cdr (assoc "exposures" raw)))
-                         (cons :total-exposures   (or (cdr (assoc "total_exposures" raw)) 0))
-                         (cons :mode-entered      (cdr (assoc "mode_entered" raw)))
-                         (cons :last-drilled      (cdr (assoc "last_drilled" raw)))
-                         (cons :added             (cdr (assoc "added" raw)))
-                         (cons :min-sessions      (or (cdr (assoc "min_sessions" raw))
-                                                       resurface-drill-promote-exposures))
-                         (cons :retired           (if (or (null retired) (eq retired :json-false))
-                                                       nil retired)))))
-               items-list)))
-        (puthash bid (list (cons :id bid) (cons :name name) (cons :items items)) ht)))
-    ht))
-
-;; ---------------------------------------------------------------------------
-;;  Adding / Removing Blocks & Sentences
-
-(defun resurface--drill-read-block-name (&optional prompt)
-  "PROMPT for a drill block name with completion."
-  (let* ((names   (resurface--drill-block-names))
-         (default resurface-drill-default-block)
-         (pr      (or prompt (format "Drill block (default %s): " default))))
-    (completing-read pr names nil nil nil nil default)))
-
-;;;###autoload
-(defun resurface-drill-add-block (name)
-  "Create a new empty drill block called NAME."
-  (interactive "sNew drill block name: ")
-  (resurface--ensure-data)
-  (if (resurface--drill-get-block-by-name name)
-      (message "Drill: block '%s' already exists." name)
-    (resurface--drill-get-or-create-block name)
-    (resurface--persist)
-    (message "Drill: block '%s' created." name)
-    (resurface--maybe-refresh-drill-dashboard)))
-
-;;;###autoload
-(defun resurface-drill-add-sentence (&optional text block note)
-  "Add TEXT as a new drill item to BLOCK (prompted if omitted).
-With NOTE, attach an optional gloss/translation shown alongside the
-sentence during review.  The item starts in Active mode."
-  (interactive)
-  (resurface--ensure-data)
-  (let* ((txt (string-trim (or text (read-string "Sentence / chunk to drill: ")))))
-    (when (string-empty-p txt)
-      (user-error "Drill: sentence is empty"))
-    (let* ((grp (or block (resurface--drill-read-block-name)))
-           (nte (or note
-                    (when (called-interactively-p 'any)
-                      (let ((s (read-string "Note / gloss (RET to skip): ")))
-                        (unless (string-empty-p s) s)))))
-           (b   (resurface--drill-get-or-create-block grp)))
-      (resurface--drill-prepend-item (cdr (assq :id b)) (resurface--drill-make-item txt nte))
-      (resurface--persist)
-      (message "Drill: added sentence to block '%s' (active)." grp)
-      (resurface--maybe-refresh-drill-dashboard))))
-
-;;;###autoload
-(defun resurface-drill-add-lines-from-region (start end &optional block)
-  "Split the region between START and END on newlines.
-add each non-blank line as its own drill item in BLOCK (prompted if omitted)."
-  (interactive "r")
-  (resurface--ensure-data)
-  (let* ((grp   (or block (resurface--drill-read-block-name)))
-         (b     (resurface--drill-get-or-create-block grp))
-         (bid   (cdr (assq :id b)))
-         (lines (seq-remove #'string-empty-p
-                            (mapcar #'string-trim
-                                    (split-string (buffer-substring-no-properties start end) "\n"))))
-         (n 0))
-    (dolist (line lines)
-      (resurface--drill-prepend-item bid (resurface--drill-make-item line))
-      (cl-incf n))
-    (when (> n 0)
-      (resurface--persist)
-      (resurface--maybe-refresh-drill-dashboard))
-    (message "Drill: added %d sentence(s) to block '%s'." n grp)))
-
-;;;###autoload
-(defun resurface-drill-remove-block (name)
-  "Delete drill block NAME and all its sentences."
-  (interactive (list (completing-read "Delete drill block: " (resurface--drill-block-names) nil t)))
-  (resurface--ensure-data)
-  (let ((b (resurface--drill-get-block-by-name name)))
-    (when (and b (yes-or-no-p (format "Delete drill block '%s' and all its entries? " name)))
-      (remhash (cdr (assq :id b)) (resurface--drill-blocks-ht))
-      (resurface--persist)
-      (message "Drill: block '%s' deleted." name)
-      (resurface--maybe-refresh-drill-dashboard))))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Session
-;;
-;; Unlike a file review, there is no "reveal" step: the sentence is shown
-;; directly, since drilling is about rereading it, not testing recall.
-
-(defvar resurface--drill-session nil
-  "Active drill session state, or nil when idle.
-Shape mirrors `resurface--leitner-session': :queue (block-id . item-alist) pairs
-left to drill, :reviewed count, :total count, :block-filter
-string-or-nil, :capped bool.")
-
-;;;###autoload
-(defun resurface-drill-start-session (&optional block-name)
-  "Start a drill session for all currently due sentences.
-With an optional prefix argument, prompt to limit the session to one
-BLOCK-NAME instead of every block."
-  (interactive
-   (list (when current-prefix-arg
-           (completing-read "Limit session to block: " (resurface--drill-block-names) nil t))))
-  (resurface--ensure-data)
-  (when (and resurface--drill-session
-             (not (yes-or-no-p "A drill session is already running.  Start a new one? ")))
-    (user-error "Drill session aborted"))
-  (let* ((due       (resurface--drill-due-pairs block-name))
-         (due-count (length due))
-         (bsuffix   (if block-name (format " in '%s'" block-name) ""))
-         (capped    (and (integerp resurface-drill-session-max-items)
-                          (> resurface-drill-session-max-items 0)
-                          (> due-count resurface-drill-session-max-items)))
-         (due       (if capped
-                        (resurface--drill-top-overdue-pairs due resurface-drill-session-max-items)
-                      due)))
-    (if (null due)
-        (message "Drill: nothing due%s, all caught up." bsuffix)
-      (setq resurface--drill-session
-            (list (cons :queue        (resurface--shuffle due))
-                  (cons :reviewed     0)
-                  (cons :total        (length due))
-                  (cons :block-filter block-name)
-                  (cons :capped       capped)))
-      (if capped
-          (message "Drill: %d due%s, queuing today's top %d most overdue.  Session starting..."
-                   due-count bsuffix (length due))
-        (message "Drill: %d sentence%s due%s.  Session starting..."
-                 (length due) (if (= (length due) 1) "" "s") bsuffix))
-      (resurface--drill-session-advance))))
-
-(defun resurface--drill-session-advance ()
-  "Show the next due sentence, or finish the session."
-  (let ((queue (cdr (assq :queue resurface--drill-session))))
-    (if (null queue)
-        (resurface--drill-session-finish)
-      (resurface--drill-show-item (car queue)))))
-
-(defun resurface--drill-session-record (outcome)
-  "Rate the sentence currently on screen with OUTCOME and advance."
-  (unless resurface--drill-session
-    (user-error "Drill: no active session"))
-  (let* ((queue    (cdr (assq :queue resurface--drill-session)))
-         (pair     (car queue))
-         (bid      (car pair))
-         (item     (cdr pair))
-         (item-id  (cdr (assq :id item)))
-         (new-item (resurface--drill-item-rate item outcome)))
-    (resurface--drill-replace-item bid item-id new-item)
-    (cl-incf (cdr (assq :reviewed resurface--drill-session)))
-    (setcdr (assq :queue resurface--drill-session) (cdr queue))
-    (let* ((retired-p (cdr (assq :retired new-item)))
-           (label (pcase outcome
-                    ('clear  (if retired-p
-                                 (propertize "Retired! Fully saturated, out of the drill pool." 'face 'success)
-                               (format "Clear -> %s" (resurface--drill-mode-label (cdr (assq :mode new-item))))))
-                    ('opaque (propertize (format "Still opaque, back tomorrow (%s)"
-                                                 (resurface--drill-mode-label (cdr (assq :mode new-item))))
-                                         'face 'font-lock-doc-face))
-                    ('retire (propertize "Retired manually." 'face 'success))
-                    ('skip   "Skipped"))))
-      (message "Drill: %s  (%d / %d done)" label
-               (cdr (assq :reviewed resurface--drill-session))
-               (cdr (assq :total    resurface--drill-session))))
-    (resurface--drill-session-advance)))
-
-(defun resurface--drill-session-finish ()
-  "Clean up and save after every due sentence has been drilled."
-  (let* ((n         (cdr (assq :reviewed resurface--drill-session)))
-         (capped    (cdr (assq :capped       resurface--drill-session)))
-         (bfilter   (cdr (assq :block-filter resurface--drill-session)))
-         (remaining (and capped (length (resurface--drill-due-pairs bfilter)))))
-    (setq resurface--drill-session nil)
-    (resurface-save)
-    (resurface--maybe-refresh-drill-dashboard)
-    (when (get-buffer resurface--drill-buf) (kill-buffer resurface--drill-buf))
-    (if (and capped (> remaining 0))
-        (message "Drill: session complete, %d sentence%s drilled.  %d more due, run `resurface-drill-start-session' again when ready.  Index saved."
-                 n (if (= n 1) "" "s") remaining)
-      (message "Drill: session complete, %d sentence%s drilled.  Index saved."
-                n (if (= n 1) "" "s")))))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Session Buffer
-
-(defconst resurface--drill-buf "*Resurface: Drill Session*"
-  "Name of the buffer used to display the sentence currently under drill.")
-
-(defvar-local resurface--drill-item  nil "Item currently shown in the drill buffer.")
-(defvar-local resurface--drill-block nil "Block id of the item currently shown.")
-
-(defvar resurface-drill-session-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "c") #'resurface-drill-mark-clear)
-    (define-key map (kbd "o") #'resurface-drill-mark-opaque)
-    (define-key map (kbd "R") #'resurface-drill-mark-retire)
-    (define-key map (kbd "s") #'resurface-drill-skip)
-    (define-key map (kbd "q") #'resurface-drill-quit-session)
-    (define-key map (kbd "?") #'resurface-drill-help)
-    map)
-  "Keymap for `resurface-drill-session-mode'.")
-
-(define-derived-mode resurface-drill-session-mode special-mode "Resurface-Drill"
-  "Read-only buffer showing the sentence currently under drill.
-Unlike a normal Leitner review there is nothing to reveal: reread the
-sentence until it stops feeling like work, then rate it."
-  :interactive nil)
-
-(defun resurface--drill-show-item (pair)
-  "Display PAIR (block-id . item-alist) in the drill session buffer."
-  (let* ((bid       (car pair))
-         (item      (cdr pair))
-         (bname     (cdr (assq :name (resurface--drill-get-block bid))))
-         (mode      (cdr (assq :mode item)))
-         (text      (cdr (assq :text item)))
-         (note      (cdr (assq :note item)))
-         (exposures (cdr (assq :exposures item)))
-         (min-sess  (cdr (assq :min-sessions item)))
-         (lr        (cdr (assq :last-drilled item)))
-         (reviewed  (cdr (assq :reviewed resurface--drill-session)))
-         (total     (cdr (assq :total    resurface--drill-session)))
-         (buf       (get-buffer-create resurface--drill-buf)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (resurface-drill-session-mode)
-        (setq resurface--drill-item  item
-              resurface--drill-block bid)
-        (cl-flet ((ins (str &optional face)
-                    (insert (if face (propertize str 'face face) str))))
-          (let* ((width (max 50 (- (window-width) 4)))
-                 (rule  (concat "  " (make-string width ?-) "\n")))
-            (ins "\n")
-            (ins (format "  DRILL  %d / %d\n" (1+ reviewed) total) '(:weight bold))
-            (ins rule 'shadow)
-            (ins "\n")
-            (ins (format "  Block:          %s\n" bname))
-            (ins (format "  Mode:           %s  (%d/%d exposures this mode)\n"
-                         (resurface--drill-mode-label mode) exposures min-sess))
-            (ins (format "  Last drilled:   %s\n" (resurface--format-ts lr)))
-            (ins "\n\n")
-            (ins (concat "  " text) '(:weight bold :height 1.2))
-            (ins "\n")
-            (when (and note (not (string-empty-p note)))
-              (ins "\n")
-              (ins (format "  %s\n" note) '(:slant italic :height 0.9)))
-            (ins "\n\n")
-            (ins "  Reread it, slowly, then at speed, until it stops feeling like work.\n"
-                 '(:slant italic))
-            (ins "\n")
-            (ins rule 'shadow)
-            (ins "  [c] Clear     [o] Still opaque     [R] Retire now     [s] Skip     [q] Quit\n"
-                 'shadow)))
-        (goto-char (point-min))))
-    (switch-to-buffer buf)))
-
-;;;###autoload
-(defun resurface-drill-mark-clear ()
-  "Rate the current drill sentence CLEAR (this pass felt smooth)."
-  (interactive)
-  (resurface--drill-session-record 'clear))
-
-;;;###autoload
-(defun resurface-drill-mark-opaque ()
-  "Rate the current drill sentence OPAQUE (still needs more exposure)."
-  (interactive)
-  (resurface--drill-session-record 'opaque))
-
-;;;###autoload
-(defun resurface-drill-mark-retire ()
-  "Force-retire the current drill sentence right now.
-Regardless of its mode or exposure thresholds."
-  (interactive)
-  (resurface--drill-session-record 'retire))
-
-;;;###autoload
-(defun resurface-drill-skip ()
-  "Skip the current drill sentence without rating it."
-  (interactive)
-  (resurface--drill-session-record 'skip))
-
-;;;###autoload
-(defun resurface-drill-quit-session ()
-  "End the current drill session early and save progress."
-  (interactive)
-  (when (yes-or-no-p "Quit this drill session (progress so far is saved)? ")
-    (setq resurface--drill-session nil)
-    (resurface-save)
-    (when (get-buffer resurface--drill-buf) (kill-buffer resurface--drill-buf))
-    (message "Drill: session ended.  Index saved.")))
-
-(defun resurface-drill-help ()
-  "Echo drill session keybindings in the echo area."
-  (interactive)
-  (message "Drill: [c] Clear   [o] Opaque   [R] Retire now   [s] Skip   [q] Quit"))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Dashboard
-
-(defvar resurface-drill-menu-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "RET") #'resurface-drill-menu-view-block)
-    (define-key map (kbd "r")   #'resurface-drill-menu-start-session)
-    (define-key map (kbd "a")   #'resurface-drill-add-sentence)
-    (define-key map (kbd "A")   #'resurface-drill-add-block)
-    (define-key map (kbd "d")   #'resurface-drill-menu-delete-block)
-    (define-key map (kbd "s")   #'resurface-drill-start-session)
-    (define-key map (kbd "S")   #'resurface-save)
-    (define-key map (kbd "g")   #'revert-buffer)
-    (define-key map (kbd "G")   #'resurface-drill-review-retired)
-    (define-key map (kbd "?")   #'resurface-drill-menu-help)
-    map)
-  "Keymap for the drill block dashboard.")
-
-(defun resurface--drill-menu-format ()
-  "Column format for the drill block dashboard."
-  [("Block"       22 t)
-   ("Items"        7 t)
-   ("Due"          5 t)
-   ("Active"       8 t)
-   ("Stabilizing" 12 t)
-   ("Maintenance" 12 t)
-   ("Retired"      8 t)])
-
-(define-derived-mode resurface-drill-menu-mode tabulated-list-mode "Resurface-Drill"
-  "Drill block overview: due counts and mode distribution for each block."
-  (setq tabulated-list-format  (resurface--drill-menu-format))
-  (setq tabulated-list-entries #'resurface--drill-menu-entries)
-  (setq header-line-format
-        (propertize "  Drill: rereading sentences, press ? for keybindings"
-                    'face '(:inherit shadow :slant italic)))
-  (setq-local revert-buffer-function
-              (lambda (_auto _noconfirm) (resurface--ensure-data) (tabulated-list-print t)))
-  (tabulated-list-init-header))
-
-(defun resurface--drill-menu-entries ()
-  "Compute tabulated-list entries for the drill dashboard."
-  (resurface--ensure-data)
-  (mapcar
-   (lambda (bname)
-     (let* ((b            (resurface--drill-get-block-by-name bname))
-            (bid          (cdr (assq :id b)))
-            (items        (resurface--drill-block-items bid))
-            (n            (length items))
-            (active-items (seq-remove #'resurface--drill-item-retired-p items))
-            (due          (length (seq-filter #'resurface--drill-item-due-p active-items)))
-            (nactive      (length (seq-filter (lambda (it) (eq (cdr (assq :mode it)) 'active)) active-items)))
-            (nstab        (length (seq-filter (lambda (it) (eq (cdr (assq :mode it)) 'stabilizing)) active-items)))
-            (nmaint       (length (seq-filter (lambda (it) (eq (cdr (assq :mode it)) 'maintenance)) active-items)))
-            (nret         (- n (length active-items))))
-       (list bid
-             (vector bname
-                     (number-to-string n)
-                     (if (> due 0) (propertize (number-to-string due) 'face 'warning) "0")
-                     (number-to-string nactive)
-                     (number-to-string nstab)
-                     (number-to-string nmaint)
-                     (if (> nret 0) (propertize (number-to-string nret) 'face 'success) "0")))))
-   (resurface--drill-block-names)))
-
-;;;###autoload
-(defun resurface-drill ()
-  "Open the drill block dashboard."
-  (interactive)
-  (resurface--ensure-data)
-  (let ((buf (get-buffer-create "*Resurface: Drill*")))
-    (with-current-buffer buf
-      (resurface-drill-menu-mode)
-      (tabulated-list-print t))
-    (switch-to-buffer buf)))
-
-(defun resurface-drill-menu-view-block ()
-  "Open the block detail view for the block on the current dashboard line."
-  (interactive)
-  (let ((bid (tabulated-list-get-id)))
-    (when bid (resurface-drill-view-block (cdr (assq :name (resurface--drill-get-block bid)))))))
-
-(defun resurface-drill-menu-start-session ()
-  "Start a drill session for the block on the current dashboard line."
-  (interactive)
-  (let ((bid (tabulated-list-get-id)))
-    (when bid (resurface-drill-start-session (cdr (assq :name (resurface--drill-get-block bid)))))))
-
-(defun resurface-drill-menu-delete-block ()
-  "Delete the drill block on the current line, with confirmation."
-  (interactive)
-  (let ((bid (tabulated-list-get-id)))
-    (when (and bid
-               (yes-or-no-p (format "Delete drill block '%s' and all its entries? "
-                                    (cdr (assq :name (resurface--drill-get-block bid))))))
-      (remhash bid (resurface--drill-blocks-ht))
-      (resurface--persist)
-      (tabulated-list-print t))))
-
-(defun resurface-drill-menu-help ()
-  "Echo drill dashboard keybindings to minibuffer."
-  (interactive)
-  (message
-   "Drill: RET view  r review  s review-all  G retired  a add-sentence  A new-block  d delete  S save  g refresh"))
-
-(defun resurface--maybe-refresh-drill-dashboard ()
-  "Silently refresh the drill dashboard buffer if it is alive."
-  (let ((buf (get-buffer "*Resurface: Drill*")))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (tabulated-list-print t)))))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Block Detail View  (sentence list + status for one block)
-
-(defvar resurface-drill-view-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "e") #'resurface-drill-view-edit-item)
-    (define-key map (kbd "x") #'resurface-drill-view-retire-item)
-    (define-key map (kbd "a") #'resurface-drill-view-reactivate-item)
-    (define-key map (kbd "d") #'resurface-drill-view-delete-item)
-    (define-key map (kbd "R") #'resurface-drill-view-retire-block)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "?") #'resurface-drill-view-help)
-    map)
-  "Keymap for the drill block detail view.")
-
-(defvar-local resurface--drill-view-block nil "Block id this detail view is showing.")
-
-(define-derived-mode resurface-drill-view-mode tabulated-list-mode "Resurface-Drill-Block"
-  "Detail view for one drill block: every sentence and its status."
-  (setq tabulated-list-format (resurface--drill-view-column-format))
-  (tabulated-list-init-header))
-
-(defun resurface--drill-view-column-format ()
-  "Return the column format vector for the drill block detail view."
-  [("Sentence"     40 t)
-   ("Mode"         12 t)
-   ("Exposures"     9 t)
-   ("Last drilled" 14 t)
-   ("Due in"       10 nil)
-   ("Status"        8 nil)])
-
-(defun resurface--drill-view-build-header (block-id)
-  "Build the header-line string for the BLOCK-ID detail view."
-  (let* ((items   (resurface--drill-block-items block-id))
-         (n       (length items))
-         (retired (length (seq-filter #'resurface--drill-item-retired-p items)))
-         (active  (- n retired))
-         (due     (length (seq-filter #'resurface--drill-item-due-p items))))
-    (propertize
-     (format "  %s   |   %d active  %d retired   |   %d due   |   e edit  x retire  a reactivate  d delete  R retire-block  q close"
-             (cdr (assq :name (resurface--drill-get-block block-id))) active retired due)
-     'face 'mode-line)))
-
-(defun resurface--drill-view-refresh (block-id)
-  "Refresh this block-view buffer's header and table for BLOCK-ID."
-  (setq header-line-format (resurface--drill-view-build-header block-id))
-  (tabulated-list-print t))
-
-(defun resurface--drill-view-entries (block-id)
-  "Build tabulated-list entries for BLOCK-ID in block view."
-  (mapcar
-   (lambda (item)
-     (let* ((id      (cdr (assq :id item)))
-            (mode    (cdr (assq :mode item)))
-            (retired (resurface--drill-item-retired-p item))
-            (exp     (cdr (assq :exposures item)))
-            (minsess (cdr (assq :min-sessions item)))
-            (lr      (cdr (assq :last-drilled item)))
-            (due-p   (resurface--drill-item-due-p item))
-            (days    (resurface--drill-item-days-until-due item))
-            (due-str (cond (retired  (propertize "-"   'face 'shadow))
-                            ((= lr 0) (propertize "new" 'face 'warning))
-                            (due-p    (propertize "due" 'face 'warning))
-                            (t        (format "%.0fd" days))))
-            (status  (cond (retired (propertize "Retired" 'face 'success))
-                            (due-p   (propertize "Due" 'face 'warning))
-                            (t       ""))))
-       (list id
-             (vector (resurface--drill-truncate (cdr (assq :text item)) 40)
-                     (if retired (propertize (resurface--drill-mode-label mode) 'face 'shadow)
-                       (resurface--drill-mode-label mode))
-                     (format "%d/%d" exp minsess)
-                     (resurface--format-ts lr)
-                     due-str
-                     status))))
-   (resurface--drill-block-items block-id)))
-
-;;;###autoload
-(defun resurface-drill-view-block (block-name)
-  "Open the detail view listing every sentence in drill block BLOCK-NAME."
-  (interactive (list (completing-read "View drill block: " (resurface--drill-block-names) nil t)))
-  (resurface--ensure-data)
-  (let* ((b   (resurface--drill-get-block-by-name block-name))
-         (bid (cdr (assq :id b)))
-         (buf (get-buffer-create (format "*Resurface: Drill: %s*" block-name))))
-    (with-current-buffer buf
-      (resurface-drill-view-mode)
-      (setq resurface--drill-view-block bid
-            header-line-format         (resurface--drill-view-build-header bid)
-            tabulated-list-entries     (lambda () (resurface--drill-view-entries bid)))
-      (setq-local revert-buffer-function
-                  (lambda (_a _n) (resurface--drill-view-refresh bid)))
-      (tabulated-list-print t))
-    (switch-to-buffer buf)))
-
-(defun resurface-drill-view-edit-item ()
-  "Edit the text of the sentence on the current line."
-  (interactive)
-  (let* ((id   (tabulated-list-get-id))
-         (bid  resurface--drill-view-block)
-         (item (and id (resurface--drill-find-item bid id))))
-    (when item
-      (let ((new-text (read-string "Sentence: " (cdr (assq :text item)))))
-        (unless (string-empty-p (string-trim new-text))
-          (resurface--drill-replace-item
-           bid id
-           (mapcar (lambda (kv) (if (eq (car kv) :text) (cons :text (string-trim new-text)) kv)) item))
-          (resurface--persist)
-          (resurface--drill-view-refresh bid))))))
-
-(defun resurface-drill-view-retire-item ()
-  "Force-retire the sentence on the current line."
-  (interactive)
-  (let* ((id   (tabulated-list-get-id))
-         (bid  resurface--drill-view-block)
-         (item (and id (resurface--drill-find-item bid id))))
-    (when (and item (yes-or-no-p "Retire this sentence? "))
-      (resurface--drill-replace-item bid id (resurface--drill-item-rate item 'retire))
-      (resurface--persist)
-      (resurface--drill-view-refresh bid)
-      (resurface--maybe-refresh-drill-dashboard))))
-
-(defun resurface-drill-view-reactivate-item ()
-  "Bring a retired sentence on the current line back to `active' mode."
-  (interactive)
-  (let* ((id   (tabulated-list-get-id))
-         (bid  resurface--drill-view-block)
-         (item (and id (resurface--drill-find-item bid id))))
-    (when (and item (resurface--drill-item-retired-p item)
-               (yes-or-no-p "Reactivate this sentence at Active? "))
-      (resurface--drill-replace-item bid id (resurface--drill-item-reactivate item))
-      (resurface--persist)
-      (resurface--drill-view-refresh bid)
-      (resurface--maybe-refresh-drill-dashboard))))
-
-(defun resurface-drill-view-delete-item ()
-  "Permanently delete the sentence on the current line from the index."
-  (interactive)
-  (let* ((id  (tabulated-list-get-id))
-         (bid resurface--drill-view-block))
-    (when (and id (yes-or-no-p "Delete this sentence from the drill block? "))
-      (resurface--drill-set-block-items
-       bid (seq-remove (lambda (it) (equal (cdr (assq :id it)) id))
-                        (resurface--drill-block-items bid)))
-      (resurface--persist)
-      (resurface--drill-view-refresh bid)
-      (resurface--maybe-refresh-drill-dashboard))))
-
-(defun resurface-drill-view-retire-block ()
-  "Batch-retire every sentence in this block at once.
-Matches the \"batch retirement, not item-level graduation\" design: once
-a whole lesson's pattern is absorbed, retire the block together instead
-of picking items off one at a time."
-  (interactive)
-  (let ((bid resurface--drill-view-block))
-    (when (yes-or-no-p "Retire EVERY sentence in this block? ")
-      (resurface--drill-set-block-items
-       bid
-       (mapcar (lambda (it) (if (resurface--drill-item-retired-p it) it
-                              (resurface--drill-item-rate it 'retire)))
-               (resurface--drill-block-items bid)))
-      (resurface--persist)
-      (resurface--drill-view-refresh bid)
-      (resurface--maybe-refresh-drill-dashboard)
-      (message "Drill: block retired."))))
-
-(defun resurface-drill-view-help ()
-  "Echo drill block detail keybindings."
-  (interactive)
-  (message "Drill block: e edit  x retire  a reactivate  d delete  R retire-block  q close"))
-
-;; ---------------------------------------------------------------------------
-;;  Drill Retired Browser
-;;
-;; Mirrors `resurface-leitner-review-graduated': lists every retired sentence
-;; (across all blocks, or just one) so you can bring anything back that
-;; started feeling rusty.  Reuses `resurface--age-str' and
-;; `resurface--format-ts', which are generic timestamp helpers.
-
-(defun resurface--drill-retired-column-format ()
-  "Column format for the drill retired browser."
-  [("Block"     16 t)
-   ("Sentence"  36 t)
-   ("Retired"   12 t)
-   ("Age"        6 t)])
-
-(defun resurface--drill-retired-entries (&optional block-name)
-  "Build tabulated-list entries for the drill retired browser."
-  (mapcar
-   (lambda (pair)
-     (let* ((bid   (car pair))
-            (item  (cdr pair))
-            (bname (cdr (assq :name (resurface--drill-get-block bid))))
-            (ret   (cdr (assq :retired item))))
-       (list (cons bid (cdr (assq :id item)))
-             (vector bname (resurface--drill-truncate (cdr (assq :text item)) 36)
-                     (resurface--format-ts ret) (resurface--age-str ret)))))
-   (resurface--drill-retired-pairs block-name)))
-
-(defun resurface--drill-retired-build-header (block-name)
-  "Build the header-line string for the drill retired browser."
-  (let ((n (length (resurface--drill-retired-pairs block-name))))
-    (propertize
-     (format "  %d retired sentence%s%s   |   r bring back   g refresh   q close"
-             n (if (= n 1) "" "s")
-             (if block-name (format "  (block: %s)" block-name) ""))
-     'face '(:inherit shadow :slant italic))))
-
-(defvar-local resurface--drill-retired-block nil
-  "The block this retired-browser buffer is filtered to, or nil for all.")
-
-(defvar resurface-drill-retired-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "r") #'resurface-drill-retired-bring-back)
-    (define-key map (kbd "g") #'revert-buffer)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "?") #'resurface-drill-retired-help)
-    map)
-  "Keymap for the drill retired-sentence browser.")
-
-(define-derived-mode resurface-drill-retired-mode tabulated-list-mode "Resurface-Drill-Retired"
-  "Browse every retired drill sentence and decide whether it stays retired."
-  (setq tabulated-list-format (resurface--drill-retired-column-format))
-  (tabulated-list-init-header))
-
-;;;###autoload
-(defun resurface-drill-review-retired (&optional block-name)
-  "Browse every retired drill sentence and decide whether it stays retired.
-With a prefix argument, limit the browser to one BLOCK-NAME instead of
-every block.  Press r on a sentence to reactivate it at `active'."
-  (interactive
-   (list (when current-prefix-arg
-           (completing-read "Limit to block: " (resurface--drill-block-names) nil t))))
-  (resurface--ensure-data)
-  (let ((buf (get-buffer-create
-              (if block-name
-                  (format "*Resurface: Drill Retired (%s)*" block-name)
-                "*Resurface: Drill Retired*"))))
-    (with-current-buffer buf
-      (resurface-drill-retired-mode)
-      (setq resurface--drill-retired-block block-name
-            tabulated-list-entries       (lambda () (resurface--drill-retired-entries block-name))
-            header-line-format           (resurface--drill-retired-build-header block-name))
-      (setq-local revert-buffer-function
-                  (lambda (_auto _noconfirm)
-                    (setq header-line-format (resurface--drill-retired-build-header block-name))
-                    (tabulated-list-print t)))
-      (tabulated-list-print t))
-    (switch-to-buffer buf)))
-
-(defun resurface-drill-retired-bring-back ()
-  "Reactivate the retired sentence under point back to `active' mode."
-  (interactive)
-  (let* ((id   (tabulated-list-get-id))
-         (bid  (car id))
-         (iid  (cdr id))
-         (item (resurface--drill-find-item bid iid)))
-    (unless item (user-error "Drill: no sentence on current line"))
-    (resurface--drill-replace-item bid iid (resurface--drill-item-reactivate item))
-    (resurface--persist)
-    (setq header-line-format (resurface--drill-retired-build-header resurface--drill-retired-block))
-    (tabulated-list-print t)
-    (resurface--maybe-refresh-drill-dashboard)
-    (message "Drill: sentence back in active rotation.")))
-
-(defun resurface-drill-retired-help ()
-  "Echo drill retired-browser keybindings."
-  (interactive)
-  (message "Drill retired: r bring back   g refresh   q close"))
-
-;; ===========================================================================
 ;;  Evil-mode Compatibility
 ;;
 ;; Keys `g', `?', `s', `a', `d', `A', `S' are intercepted by evil by default;
@@ -2412,26 +1687,18 @@ every block.  Press r on a sentence to reactivate it at `active'."
 ;; so our own keymaps are consulted.  Tabulated-list navigation (TAB, arrows,
 ;; n/p) still works since those live in `tabulated-list-mode-map'.  We then
 ;; add back `j'/`k' as plain evil motion on top.
+;;
+;; Drill mode modes get the same treatment, but from `resurface-drill.el' itself
 (with-eval-after-load 'evil
   (evil-set-initial-state 'resurface-leitner-menu-mode 'emacs)
   (evil-set-initial-state 'resurface-leitner-group-view-mode 'emacs)
   (evil-set-initial-state 'resurface-leitner-graduated-mode 'emacs)
   (evil-set-initial-state 'resurface-leitner-front-mode 'emacs)  ; SPC/s also live in evil-motion-state-map
-  (evil-set-initial-state 'resurface-drill-menu-mode 'emacs)
-  (evil-set-initial-state 'resurface-drill-view-mode 'emacs)
-  (evil-set-initial-state 'resurface-drill-retired-mode 'emacs)
-  (evil-set-initial-state 'resurface-drill-session-mode 'emacs) ; c/o/s/R keys, same idea as front-mode
   (dolist (map (list resurface-leitner-menu-mode-map
                      resurface-leitner-group-view-mode-map
-                     resurface-leitner-graduated-mode-map
-                     resurface-drill-menu-mode-map
-                     resurface-drill-view-mode-map
-                     resurface-drill-retired-mode-map))
+                     resurface-leitner-graduated-mode-map))
     (define-key map (kbd "j") #'evil-next-line)
     (define-key map (kbd "k") #'evil-previous-line))
-  ;; Review minor mode uses C-c l <key>, which evil doesn't shadow in normal
-  ;; state, but evil-make-overriding-map + normalize is a safety net so the
-  ;; minor-mode map is always consulted first regardless of buffer state.
   (evil-make-overriding-map resurface-leitner-review-minor-mode-map 'normal)
   (add-hook 'resurface-leitner-review-minor-mode-hook #'evil-normalize-keymaps))
 
