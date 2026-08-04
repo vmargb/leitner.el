@@ -1,4 +1,4 @@
-#+TITLE: resurface.el: rereading and revising for your org notes.
+#+TITLE: resurface.el: SRS for your org notes + Incremental reading
 #+AUTHOR: vmargb
 #+DESCRIPTION: Resurface material for review using a modified Leitner box system.
 #+LICENSE: GPL-3.0-or-later
