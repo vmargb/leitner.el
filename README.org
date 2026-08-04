@@ -1,16 +1,12 @@
-#+TITLE: resurface.el: rereading, drilling, and revising for your org notes.
+#+TITLE: resurface.el: rereading and revising for your org notes.
 #+AUTHOR: vmargb
-#+DESCRIPTION: Resurface material for review, Leitner box system for whole files, or Drill mode for rereading sentences.
+#+DESCRIPTION: Resurface material for review using a modified Leitner box system.
 #+LICENSE: GPL-3.0-or-later
-
-#+BEGIN_QUOTE
-=resurface.el= is designed only for my unique use-case, but feel free to test it if you see a similar novelty in it. I use this mostly for *re-reading* and *revising* my long-form notes for hard concepts. Whatever you use it for, the main purpose is *rereading* material you want to be resurfaced to you, *not* flashcards or active-recall.
-#+END_QUOTE
 
 ** What is Resurface?
 Resurface is an Emacs package for keeping long-form knowledge familiar over time through scheduled rereading.
 
-Unlike traditional spaced repetition systems, Resurface is *not* designed around active recall or flashcards. Instead it treats rereading as a continuous process of /maintaining familiarity/. Every review contributes *evidence* about how well a note is understood, and that evidence is accumulated over multiple sessions before future review intervals are adjusted.
+Unlike traditional spaced repetition systems, Resurface is *not* designed around active-recall flashcards. Instead it treats rereading as a continuous process of /maintaining familiarity/. Every review contributes *evidence* about how well a note is understood, and that evidence is accumulated over multiple sessions before future review intervals are adjusted.
 
 ** Installation with =package-vc-install= (emacs 29+)
  Add the following to your ~init.el~:
@@ -19,24 +15,7 @@ Unlike traditional spaced repetition systems, Resurface is *not* designed around
     (use-package resurface
       :vc (:url "https://github.com/vmargb/resurface.el")
       :bind ("C-c r l" . resurface-leitner)
-      :bind ("C-c r d" . resurface-drill))
- #+END_SRC
-
-*** Example Customization
- #+BEGIN_SRC emacs-lisp
- (setq resurface-index-file "~/notes/.resurface-index.json") ; change location
- (setq resurface-leitner-intervals [1 2 4 8 16 32]) ; set your own ideal intervals
- (setq resurface-leitner-default-group "General") ; default when group not provided
- (setq resurface-enable-drill-mode t) ; require resurface-drill.el
-
- ;; Familiarity Scheduler tuning, these are all optional
- (setq resurface-leitner-history-length 5) ; ratings kept per item
- (setq resurface-leitner-weighting 'linear) ; linear | exponential | uniform
- (setq resurface-leitner-promote-threshold 0.80)
- (setq resurface-leitner-demote-threshold -0.40)
- (setq resurface-leitner-reset-threshold -0.80)
- (setq resurface-leitner-interval-tolerance 0.20) ; +/- 20% scheduling slack around the ideal
- (setq resurface-leitner-workload-weight 1.0) ; 0 disables workload-awareness
+      :bind ("C-c r i" . resurface-ir))
  #+END_SRC
 
 ** Quick Start
@@ -44,27 +23,54 @@ Unlike traditional spaced repetition systems, Resurface is *not* designed around
 [[./leitner-dashboard.png]]
 /An example dashboard showing groups, boxes, and due files etc./
 
- | Keybinding                | Command               | Description                               |
- |---------------------------+-----------------------+-------------------------------------------|
- | =M-x resurface-leitner=               | =resurface-leitner=               | Open the group dashboard.                 |
- | =M-x resurface-leitner-add-group=     | =resurface-leitner-add-group=     | Add a new group.                          |
- | =M-x resurface-leitner-add-file=      | =resurface-leitner-add-file=      | Add the current buffer's file to a group. |
- | =M-x resurface-leitner-start-session= | =resurface-leitner-start-session= | Start a review session for due files.     |
+ | Keybinding                             | Command                            | Description                                      |
+ |----------------------------------------+------------------------------------+--------------------------------------------------|
+ | =M-x resurface-leitner=                  | =resurface-leitner=                  | Open the group dashboard.                        |
+ | =M-x resurface-leitner-add-group=        | =resurface-leitner-add-group=        | Add a new group.                                 |
+ | =M-x resurface-leitner-add-file=         | =resurface-leitner-add-file=         | Add the current buffer's file to a group.        |
+ | =M-x resurface-leitner-start-session=    | =resurface-leitner-start-session=    | Start a review session for due files.            |
  | =M-x resurface-leitner-review-graduated= | =resurface-leitner-review-graduated= | Browse graduated files; bring any back to Box 1. |
- | =M-x resurface-leitner-healthcheck=   | =resurface-leitner-healthcheck=   | Resolve deleted/renamed/moved files.      |
+ | =M-x resurface-leitner-healthcheck=      | =resurface-leitner-healthcheck=      | Resolve deleted/renamed/moved files.             |
+
+*** Example Customization
+ #+BEGIN_SRC emacs-lisp
+ (setq resurface-index-file "~/notes/.resurface-index.json") ; change location
+ (setq resurface-leitner-intervals [1 2 4 8 16 32]) ; set your own ideal intervals
+ (setq resurface-leitner-default-group "General") ; default when group not provided
+ (setq resurface-enable-cloze-mode t) ; require resurface-cloze.el alongside Leitner
+ (setq resurface-enable-ir-mode t)    ; incremental reading
+
+ ;; familiarity Scheduler tuning, these are all optional
+ (setq resurface-leitner-ema-alpha-min 0.15)         ; smallest per-rating confidence nudge
+ (setq resurface-leitner-ema-alpha-max 0.65)         ; largest, used after a long gap
+ (setq resurface-leitner-min-reviews 3)              ; base evidence required at Box 1
+ (setq resurface-leitner-min-reviews-box-decay 0.25) ; less evidence needed per box up
+ (setq resurface-leitner-variance-weight 1.0)        ; inconsistent ratings need more evidence
+ (setq resurface-leitner-promote-threshold 0.80)     ; confidence needed to promote, at Box 1
+ (setq resurface-leitner-threshold-decay 0.15)          ; decays per box above Box 1
+ (setq resurface-leitner-promote-threshold-floor 0.30)  ; never decays below this
+ (setq resurface-leitner-demote-threshold -0.40)  ; confidence that triggers a demotion
+ (setq resurface-leitner-demote-max-drop 3)       ; worst-case boxes dropped in one go
+ (setq resurface-leitner-interval-tolerance 0.20) ; +/- 20% scheduling slack around the ideal
+ (setq resurface-leitner-workload-weight 1.0) ; 0 disables workload-awareness
+ #+END_SRC
 
 
 ** Modified Leitner mode
-The classic Leitner box system has been modified to use a /familiarity scheduler/. You can read more about the original Leitner system [[https://en.wikipedia.org/wiki/Leitner_system][here]].
+You can read more about the original Leitner system [[https://en.wikipedia.org/wiki/Leitner_system][here]].
 
-Ratings are instead *Familiar* / *Unfamiliar* rather than Good/Bad, reading back a long-form note is no longer a recall test. Two more ratings cover the practical edges of rereading:
+The classic Leitner box system has been modified to use what I call a /familiarity scheduler/.
+
+Ratings are instead *Familiar* / *Unfamiliar* rather than Good/Bad, reading back a long-form note is no longer a recall test but about how well you understood the material after rereading it. Two more ratings cover the practical edges of rereading:
 
 - /Partial/: For files too long to finish reading in one sitting. The file is *paused* and comes due again the next day so you can pick up where you left off. Works well with =save-place-mode=.
 - /Revised/: For when you *edited* or *added new content*. Box stays untouched, but the review counts as complete, so the file returns on its normal box interval rather than tomorrow.
 - /Skip/: Leaves the file in its current box without altering its schedule.
 
 *** How the Familiarity Scheduler works
-#+begin_quote
+Below is an oversimplified model of how the algorithm works, to read more go to the [[./docs/familiarity-scheduler.org][docs]].
+
+#+begin_example
 Familiarity ratings
         |
         v
@@ -75,67 +81,93 @@ Desired review interval
         |
         v
 Workload-aware scheduler
-#+end_quote
+#+end_example
 
-A single session's rating is a noisy one-off read on how a file feels, which is an unreliable measurement. This was a big weakness of Leitner. So now, no single Good/Bad rating moves the box directly. Instead:
+A single session's rating is too noisy, which is an unreliable measurement for rereading. This was a big weakness of original Leitner. So now, no single Good/Bad rating moves the box directly. Instead:
 
-1. Every rating is appended to a short rolling history (=resurface-leitner-history-length=, default 5).
-2. That history becomes a *confidence score* from -1 to +1, a recency-weighted average (=resurface-leitner-weighting=: =linear= by default, or =exponential=/=uniform=).
-3. The box only moves when the confidence score clears a threshold: =resurface-leitner-promote-threshold= (default 0.80) promotes one box (or graduates, from the last box). Anywhere between demote and promote, the file just stays put. 
-4. Each box is now an *ideal* interval rather than an exact deadline. The scheduler looks at every day within =resurface-leitner-interval-tolerance= (default +/-20%) of that ideal and self-balances by picking whichever is least crowded with other reviews (=resurface-leitner-workload-weight=). This is actually used in distributed computer systems. If thousands of servers all retry at exactly 10 seconds, they overload the network
+1. Every rating updates a *confidence score* from -1 to +1.
+2. That update is *time-aware*: Rereading something you only just saw barely moves the needle, since you haven't proven anything new, surviving a long gap is real evidence and moves the confidence more.
+3. The box only moves once confidence clears a threshold, /and/ enough ratings have landed since the last move.
+4. The threshold itself decays for higher boxes too, so promotion gets easier to earn the further up you already are. Demotion is adaptive rather than a flat "back 1 box" or "back to box 1": how far it drops scales with how badly confidence missed the threshold, so one bad session doesn't punish you as hard.
+5. Each box is now an *ideal* interval rather than an exact deadline. The scheduler looks at every day around the ideal and self-balances load by picking whichever is least crowded with other reviews. This is actually used in distributed systems. If thousands of servers all retry at exactly 10 seconds, they overload the network.
 
-The explicit "reset to Box 1" action (=r= in the detail/graduated views) always goes straight to Box 1 and clears the history, regardless of current confidence, which manually overrides the existing scheduling.
+The explicit "reset to Box 1" action (=r= in the detail/graduated views) always goes straight to Box 1 and clears confidence/variance back to zero, regardless of current standing, which manually overrides existing scheduling.
 
 *** Optional question prompts
-Though this is built around reviewing long-form documents, you /can/ *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards. Otherwise it will fallback to your =#+TITLE:=. Or just leave this empty and it will ignore the prompt entirely.
+Though this is built around reviewing long-form documents, you /can/ *optionally* add specific question prompts with =#+LEITNER_PROMPT:= at the top of an org file to create standard Q&A flashcards(useful for incremental reading). Otherwise it will fallback to your =#+TITLE:=. Or just leave this empty and it will ignore the prompt entirely.
 
 
-** Drill Mode: rereading sentences, not testing recall
-Drill mode is a *second, parallel* review system, built specifically for language learning (but can be generalized for anything else). The idea comes from the book *Henle's Latin* where you practice re-reading the same sentence many many times until the meaning naturally /emerges/ out of the repetiton. There is no hidden "answer" to reveal, and no good/bad rating. Every session you just say whether a sentence feels *opaque* or if it feels *clear* yet.
+** Incremental Reading mode
+Incremental Reading (IR) is a *second, independent* companion, for when the thing you're resurfacing isn't a note file you already wrote, but parts of a book, paper, or article you want to remember.
 
-Drill mode lives in its own file, =resurface-drill.el=, loaded automatically the first time you call one of its commands (see =resurface-enable-drill-mode= if you'd rather it load up front instead).
+As a minimal solution it does two things, and deliberately nothing else:
 
- | Keybinding                       | Command                       | Description                                    |
- |-----------------------------------+--------------------------------+-------------------------------------------------|
- | =M-x resurface-drill=                 | =resurface-drill=                 | Open the drill block dashboard.                |
- | =M-x resurface-drill-add-block=       | =resurface-drill-add-block=       | Add a new drill block.                         |
- | =M-x resurface-drill-add-sentence=    | =resurface-drill-add-sentence=    | Add a sentence/chunk to a block.               |
- | =M-x resurface-drill-add-lines-from-region= | =resurface-drill-add-lines-from-region= | Add every non-blank line in the region as its own sentence. |
- | =M-x resurface-drill-start-session=   | =resurface-drill-start-session=   | Drill all due sentences (=C-u=: one block).      |
- | =M-x resurface-drill-review-retired=  | =resurface-drill-review-retired=  | Browse retired sentences; bring any back to Active. |
+1. *Decides which sources you see today.* Register a PDF, EPUB, or URL with =resurface-ir-add-source= and give it a 0-100 priority. =resurface-ir-start-session= builds a queue from whatever's currently due, shuffled a little for noise and then sorted by priority, so high-priority sources come up more often. The cards you make from each snippet are fed into the same scheduler that =resurface-leitner= uses.
 
-*** Adding sentences
-=resurface-drill-add-sentence= (and the =e= edit command in a block's
-detail view) no longer type into the minibuffer. Instead they open a
-small dedicated buffer to write or paste into: normal editing commands,
-multi-line paste, and =evil-mode= all work there like any other buffer.
-Press =C-c C-c= to accept, =C-c C-k= to discard. When adding, write one
-sentence per line; every non-blank line becomes its own drill item in
-the chosen block, so pasting several sentences at once adds them all.
+2. *Turn a selection into a card.* IR does not implement a document reader. =resurface-ir-open-function= is called with the source to open it, by default =find-file= for local files (which is all a pdf reader like [[https://codeberg.org/MonadicSheep/emacs-reader][emacs-reader]] needs) and =eww= for URLs to a webpage. Resuming where you left off inside a source is left entirely to Emacs' own =save-place-mode=. While reading, select any passage and run =resurface-ir-capture= (=C-c i c=): it opens a dedicated buffer with the selection dropped in, ready to /reword/ or add =cloze-deletions=. =C-c C-c= sends the result as a brand-new =.org= card under the source's own Leitner and drops you back exactly where you were reading. From that point on the card is a perfectly ordinary Leitner item, reviewed by the same Familiarity Scheduler. And that's it!
 
-*** How it works
-A drill item is scored on how much saturated exposure it has had. Sentences move through three modes instead of numbered boxes:
 
-=active -> stabilizing -> maintenance -> retired=
+ | Keybinding                          | Command                         | Description                                          |
+ |--------------------------------------+----------------------------------+-------------------------------------------------------|
+ | =M-x resurface-ir=                        | =resurface-ir=                        | Open the source-queue dashboard.                     |
+ | =M-x resurface-ir-add-source=             | =resurface-ir-add-source=             | Register a PDF/EPUB/URL and set its priority.        |
+ | =M-x resurface-ir-start-session=          | =resurface-ir-start-session=          | Open today's due sources, highest priority first.    |
+ | =M-x resurface-ir-capture=                | =resurface-ir-capture=                | Reword the active selection into a Leitner card.     |
+ | =M-x resurface-ir-review-finished=        | =resurface-ir-review-finished=        | Browse finished sources bring any back into rotation. |
 
-During a drill session, the sentence is shown directly (no reveal step) with three ratings:
-- /Clear/: arrived at understanding, counts toward promotion.
-- /Opaque/: still needs work, resets the streak, resurfaces tomorrow.
-- /Retire now/: force-retire immediately, regardless of thresholds.
-- /Skip/: leave the sentence untouched.
+*** Reading-session keybindings
+Bound in the source's buffer once opened via a session or the dashboard (=resurface-ir-reading-minor-mode=):
 
-Movement needs *both* enough consecutive =Clear= outcomes (=resurface-drill-promote-exposures=, default 3) *and* a minimum number of days having passed in that mode (=resurface-drill-min-days-per-mode=, default 3, that stops an easy sentence graduating on day one). An =Opaque= outcome resets that streak to zero and always brings the sentence back tomorrow, regardless of its mode's normal interval. If it happens in =maintenance=, the sentence also demotes straight back to =active=, if it got rusty.
+- =C-c i c=: capture the current selection into a card (see above).
+- =C-c i d=: done for now, reschedules the source and moves to the next queued one.
+- =C-c i f=: mark the source fully finished, it drops out of the rotation.
+- =C-c i s=: skip, leaving the source's schedule untouched.
+- =C-c i q=: quit the session, progress so far is saved.
 
-You can also batch-retire an entire block at once from its detail view (=R=), rather than only ever retiring one sentence at a time.
+*** Customization
+#+BEGIN_SRC emacs-lisp
+
+(setq resurface-ir-capture-directory "~/notes/resurface-ir-cards/") ; where captured cards are written
+(setq resurface-ir-default-priority 50)  ; offered when adding a source
+(setq resurface-ir-session-max-items 5)  ; nil queues every due source
+;; the day-picker, same tuning knobs as Leitner's boxes (see above)
+(setq resurface-ir-max-gap-days 14)          ; ideal gap at priority 0
+(setq resurface-ir-min-gap-days 1)           ; ideal gap at priority 100
+(setq resurface-ir-interval-tolerance 0.3)
+(setq resurface-ir-workload-weight 0.3)
+
+;; swap in a different reader, receives the full source alist
+(setq resurface-ir-open-function #'my/open-with-pdf-tools-or-nov)
+#+END_SRC
+
+
+** Cloze mode: add cloze-deletions to your cards
+
+Mark any span of text like =The capital of France is {{Paris}}.= and, once =resurface-cloze-mode= is enabled in that buffer, the marked text is masked until the cursor moves into it, then hidden again once point leaves.
+
+ | Keybinding                              | Command                            | Description                                      |
+ |------------------------------------------+-------------------------------------+---------------------------------------------------|
+ | =M-x resurface-cloze-mode=                    | =resurface-cloze-mode=                    | Toggle hiding/revealing clozes in this buffer.   |
+ | =M-x resurface-cloze-dwim=                    | =resurface-cloze-dwim=                    | Cloze the region, or insert an empty cloze at point. |
+ | =M-x resurface-cloze-remove-at-point=         | =resurface-cloze-remove-at-point=         | Strip the cloze delimiters around point.         |
+ | =M-x resurface-cloze-hide-all=                | =resurface-cloze-hide-all=                | Force every cloze in the buffer shut.            |
+ | =M-x resurface-cloze-reveal-all=              | =resurface-cloze-reveal-all=              | Force every cloze in the buffer open.            |
 
 *** Example Customization
 #+BEGIN_SRC emacs-lisp
-(setq resurface-drill-intervals '((active . 1) (stabilizing . 4) (maintenance . 14))) ; days between resurfacing, per mode
-(setq resurface-drill-promote-exposures 3) ; consecutive Clear outcomes needed to advance a mode
-(setq resurface-drill-min-days-per-mode 3) ; mandatory minimum days spent in a mode before advancing
-(setq resurface-drill-default-block "General")
+(setq resurface-enable-cloze-mode t) ; require resurface-cloze.el alongside Leitner
+
+(setq resurface-cloze-open "{{")  ; opening delimiter
+(setq resurface-cloze-close "}}") ; closing delimiter
+(setq resurface-cloze-style 'mask)          ; 'mask (matches hidden length) | 'fixed
+(setq resurface-cloze-placeholder "[...]")  ; used when style is 'fixed
+(setq resurface-cloze-mask-char ?█)         ; used when style is 'mask
+(setq resurface-cloze-hide-delimiters t)    ; nil keeps {{ }} visible as a marker
 #+END_SRC
 
 ** Changelog
-- /v0.2.0:/ Full rewrite based around a *Familiarity Scheduler*: ratings are now Familiar/Unfamiliar, building a rolling recency-weighted confidence score rather than moving the box on a single rating. Boxes are now ideal intervals, not deadlines, next-review dates are chosen from a small window around the ideal to spread load across quieter days. 
-- /v0.1.0:/ Standard Leitner box implementation with extra features: random box shuffling, rename groups, healthcheck, batch add files through dired, graduated-file-browser, partial and revised ratings and resurface-drill.
+- /v0.3.0: (EMA scheduler)/ Replaced the rolling-history window with an O(1) exponential moving average. Confidence updates are now time-aware (a rating's weight scales with the gap since the last review). Box-move thresholds are now adaptive, the evidence required to move is less for higher boxes and grows with variance, the promotion threshold itself decays for higher boxes, and demotion severity scales with how badly the confidence missed the threshold instead of always dropping back to box 1.
+- /v0.2.2: (incremental reading)/ =resurface-ir.el= keeps a priority queue of whole sources (PDFs, EPUBs, web pages) and decides which are due each day via the same scheduler =resurface-leitner= uses. Captures a selection from any reader into a dedicated reword-then-file buffer, filing the result as an ordinary Leitner card under the source's own group.
+- /v0.2.1: (cloze deletions)/ New optional companion file, =resurface-cloze.el=. Marks text spans (like =\{\{Paris\}\}=) and hides them behind an overlay placeholder until point moves into them.
+- /v0.2.0: (new engine)/ Full rewrite based around a *Familiarity Scheduler*: ratings are now Familiar/Unfamiliar, building a rolling recency-weighted confidence score rather than moving the box on a single rating. Boxes are now ideal intervals, not deadlines, next-review dates are chosen from a small window around the ideal to spread load across quieter days. 
+- /v0.1.0: (initial)/ Standard Leitner box implementation with extra features: random box shuffling, rename groups, healthcheck, batch add files through dired, graduated-file-browser, partial and revised ratings and resurface-drill.
