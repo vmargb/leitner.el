@@ -5,7 +5,7 @@
 
 Resurface is an Emacs package that keeps long-form knowledge familiar over time through scheduled rereading.
 
-Unlike traditional spaced repetition systems focused on active recall, Resurface treats rereading as a continuous process of *maintaining familiarity* using an adaptive **Familiarity Scheduler**.
+Unlike traditional spaced repetition systems focused on active recall, Resurface treats rereading as a continuous process of *maintaining familiarity* using an adaptive /Familiarity Scheduler/.
 
 -----
 
@@ -38,12 +38,14 @@ Requires Emacs 29+. Add the following to your ~init.el~:
 - *Skip:* Leaves the file in its current box without updating schedule.
 
 ** Keybindings
-~M-x resurface-leitner~:                   Open the group dashboard
-~M-x resurface-leitner-add-group~:         Add a new group
-~M-x resurface-leitner-add-file~:          Add current buffer's file to a group
-~M-x resurface-leitner-start-session~:     Start a review session for due files
-~M-x resurface-leitner-review-graduated~:  Browse graduated files (reset to Box 1)
-~M-x resurface-leitner-healthcheck~:       Resolve deleted/renamed/moved files
+| Keybinding                             | Command                            | Description                              |
+|----------------------------------------+------------------------------------+------------------------------------------|
+| ~M-x resurface-leitner~                  | ~resurface-leitner~                  | Open the group dashboard.                |
+| ~M-x resurface-leitner-add-group~        | ~resurface-leitner-add-group~        | Add a new group.                         |
+| ~M-x resurface-leitner-add-file~         | ~resurface-leitner-add-file~         | Add current buffer to a group.           |
+| ~M-x resurface-leitner-start-session~    | ~resurface-leitner-start-session~    | Start a review session for due files.    |
+| ~M-x resurface-leitner-review-graduated~ | ~resurface-leitner-review-graduated~ | Browse graduated files (reset to Box 1). |
+| ~M-x resurface-leitner-healthcheck~      | ~resurface-leitner-healthcheck~      | Resolve deleted/renamed/moved files.     |
 
 ** Customization & Tuning
 #+BEGIN_SRC emacs-lisp
