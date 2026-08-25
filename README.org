@@ -5,12 +5,12 @@
 
 Resurface is an Emacs package that keeps long-form knowledge familiar over time through scheduled rereading.
 
-Unlike traditional spaced repetition systems focused on active recall, Resurface treats rereading as a continuous process of *maintaining familiarity* using an adaptive /Familiarity Scheduler/.
+Unlike traditional spaced repetition systems designed around flashcards, Resurface is a unique way to manage notes outside of active-recall. Particularly for the process of revising over a large collection of long linear notes, or a zettelkasten where testing yourself on the notes is not necessary.
 
 -----
 
 * Features
-- *Familiarity-Based Scheduling:* Rates notes by using a unique familiary-based scheduler designed for long-form material.
+- *Familiarity-Based Scheduling:* Rates notes by using a unique familiary-based scheduler designed for long-form material, borrowing ideaas from the Leitner box system and SM-2 algorithm.
 - *Incremental Reading (IR):* Queue PDFs, EPUBs, or URLs by priority and capture snippets to review later or create flashards.
 - *Cloze-Deletions:* Mask important text spans you want to recall with ~{{example}}~ when the cursor moves over them (or with =resurface-cloze-reveal-all=)
 
@@ -37,6 +37,14 @@ Requires Emacs 29+. Add the following to your ~init.el~:
 - *Revised:* Used when editing/adding new content. Completes the review without altering box schedule.
 - *Skip:* Leaves the file in its current box without updating schedule.
 
+** Feynman Attempts
+Two ways to use this, both optional at the group level:
+
+- *Forced, per-deck:* mark a group as Feynman mode from the dashboard (~F~). Every due card in that group then requires the attempt /before/ the note appears at all. Pressing ~SPC~ on the front card opens the scratch pad first with nothing to peek at. ~C-c C-c~ both saves the attempt and reveals the note, side by side.
+- *Ad-hoc, mid-review:* ~C-c l e~ while a note is open, opens a scratch buffer beside it. Write the file's main points from memory, in your own words, then compare side by side. ~C-c C-c~ appends the attempt to the end of the note under a dated ~* Feynman Attempts~ heading and closes it, ~C-c C-k~ discards it. Meant for a casual check.
+
+Either way, only one attempt is kept in flight, and it's cleared automatically whenever the session moves to the next card.
+
 ** Keybindings
 | Keybinding                             | Command                            | Description                              |
 |----------------------------------------+------------------------------------+------------------------------------------|
@@ -46,6 +54,7 @@ Requires Emacs 29+. Add the following to your ~init.el~:
 | ~M-x resurface-leitner-start-session~    | ~resurface-leitner-start-session~    | Start a review session for due files.    |
 | ~M-x resurface-leitner-review-graduated~ | ~resurface-leitner-review-graduated~ | Browse graduated files (reset to Box 1). |
 | ~M-x resurface-leitner-healthcheck~      | ~resurface-leitner-healthcheck~      | Resolve deleted/renamed/moved files.     |
+| ~F~ on a dashboard line                | ~resurface-leitner-menu-toggle-feynman~ | Toggle Feynman mode for that group.      |
 
 ** Customization & Tuning
 #+BEGIN_SRC emacs-lisp
@@ -136,7 +145,7 @@ Mask text regions formatted like ~{{cloze}}~. Text is hidden behind placeholders
 
 * Technical Details: How the Familiarity Scheduler Works
 
-For more information on how the scheduler works: [[./docs/familiarity-scheduler.org][docs/familiarity-scheduler.org]].
+For more information on how the scheduler works: [[./docs/familiarity-scheduler.org][docs/familiarity-scheduler]].
 A very simplified explanation of the features:
 
 1. *Confidence Scoring:* Ratings shift a file's confidence score (-1.0 to +1.0).
@@ -147,6 +156,7 @@ A very simplified explanation of the features:
 -----
 
 * Changelog
+- *v0.3.1:* Optional feynman-technique mode for studying hard subjects. Explain from memory in a scratchpad before revealing note.
 - *v0.3.0:* Improved with Exponential Moving Average (EMA) scheduler with time-aware confidence and adaptive demotions.
 - *v0.2.2:* Added Incremental Reading mode (~resurface-ir.el~).
 - *v0.2.1:* Added Cloze deletions (~resurface-cloze.el~).

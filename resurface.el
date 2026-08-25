@@ -1,6 +1,6 @@
 ;;; resurface.el --- Resurface material for rereading and review  -*- lexical-binding: t; -*-
 ;; Author: vmargb
-;; Version: 0.3.0
+;; Version: 0.3.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: notes, spaced-repetition, org, feynman
 ;; URL: https://github.com/vmargb/resurface.el
@@ -26,14 +26,14 @@
 ;; See `resurface--leitner-decide' and `resurface--choose-next-review'
 ;; for the two functions this all runs through.
 ;;
-;; Quick start -- Leitner (whole files):
+;; Quick start: Leitner (whole files):
 ;;   M-x resurface-leitner                  Open the group dashboard
 ;;   M-x resurface-leitner-add-group        Add a new group
 ;;   M-x resurface-leitner-add-file         Add current buffer's file to a group
 ;;   M-x resurface-leitner-start-session    Review all due files (C-u: one group)
 ;;   M-x resurface-leitner-review-graduated Browse graduated files (C-u: one group)
 ;;
-;; Quick start -- Incremental Reading (sources + capture, resurface-ir.el):
+;; Quick start: Incremental Reading (sources + capture, resurface-ir.el):
 ;;   M-x resurface-ir                       Open the source-queue dashboard
 ;;   M-x resurface-ir-add-source            Register a PDF/EPUB/URL, set its priority
 ;;   M-x resurface-ir-start-session         Open today's sources by priority, one at a time
@@ -682,9 +682,21 @@ so Denote's lowercase #+title: is handled too)."
 (defun resurface--leitner-get-or-create-group (name)
   "Return the group alist for NAME, creating it if it does not exist."
   (or (resurface--leitner-get-group name)
-      (let ((g (list (cons :name name) (cons :items nil))))
+      (let ((g (list (cons :name name) (cons :items nil) (cons :feynman nil))))
         (puthash name g (resurface--leitner-groups-ht))
         g)))
+
+(defun resurface--leitner-group-feynman-p (gname)
+  "Non-nil if group GNAME has Feynman mode enabled."
+  (and gname (cdr (assq :feynman (resurface--leitner-get-group gname)))))
+
+(defun resurface--leitner-set-group-feynman (gname value)
+  "Set GNAME's Feynman-mode flag to VALUE (mutates in-place)."
+  (let ((g (resurface--leitner-get-group gname)))
+    (when g
+      (if (assq :feynman g)
+          (setcdr (assq :feynman g) value)
+        (nconc g (list (cons :feynman value)))))))
 
 (defun resurface--leitner-group-items (name)
   "Return the items list for group NAME (may be nil)."
@@ -825,7 +837,9 @@ otherwise whatever was last read comes back out untouched."
                          (cons 'graduated     (or (cdr (assq :graduated item)) :json-false))
                          (cons 'paused        (if (cdr (assq :paused item)) t :json-false))))
                  items))))
-         (push (cons gname (list (cons 'name  gname) (cons 'items encoded-items)))
+         (push (cons gname (list (cons 'name  gname)
+                                  (cons 'feynman (if (cdr (assq :feynman g)) t :json-false))
+                                  (cons 'items encoded-items)))
                groups-list)))
      (resurface--leitner-groups-ht))
     (list (cons 'version       5)
@@ -892,7 +906,11 @@ Only used once, when loading a pre-EMA (version < 5) index in
                          (cons :graduated     (if (or (null grad) (eq grad :json-false)) nil grad))
                          (cons :paused        (and paused (not (eq paused :json-false)))))))
                items-list)))
-        (puthash gname (list (cons :name gname) (cons :items items)) ht)))
+        (puthash gname (list (cons :name gname)
+                              (cons :feynman (let ((f (cdr (assoc "feynman" gdata))))
+                                               (and f (not (eq f :json-false)))))
+                              (cons :items items))
+                 ht)))
     (list (cons :groups       ht)
           ;; passthrough for "ir_sources", see the :ir-sources comment above
           (cons :ir-sources (if (fboundp 'resurface--json-sexp->ir-sources)
@@ -1338,6 +1356,7 @@ With an optional prefix argument, prompt to limit review to one GROUP-NAME."
     (resurface--leitner-replace-item gname path new-item)
     (cl-incf (cdr (assq :reviewed resurface--leitner-session)))
     (setcdr (assq :queue resurface--leitner-session) (cdr queue))
+    (resurface--leitner-feynman-cleanup)
     (when resurface-leitner-review-minor-mode
       (resurface-leitner-review-minor-mode -1))
     (message "Leitner: %s  (%d / %d done)"
@@ -1390,6 +1409,7 @@ how many files are still due so the remaining backlog stays visible."
 
 (defun resurface--leitner-show-front-card (pair)
   "Display the front card for PAIR (group-name . item-alist)."
+  (resurface--leitner-feynman-cleanup)
   (let* ((gname    (car pair))
          (item     (cdr pair))
          (path     (cdr (assq :path item)))
@@ -1401,6 +1421,7 @@ how many files are still due so the remaining backlog stays visible."
          (interval (resurface--leitner-box-days box))
          (progress (resurface--leitner-item-evidence-str item))
          (evidence (resurface--leitner-item-evidence-note item))
+         (feynman  (resurface--leitner-group-feynman-p gname))
          (buf      (get-buffer-create resurface--leitner-front-buf)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -1416,7 +1437,8 @@ how many files are still due so the remaining backlog stays visible."
             (ins (format "  LEITNER  %d / %d\n" (1+ reviewed) total) '(:weight bold))
             (ins rule 'shadow)
             (ins "\n")
-            (ins (format "  Group:          %s\n" gname))
+            (ins (format "  Group:          %s%s\n" gname
+                        (if feynman (propertize "  [Feynman mode]" 'face 'font-lock-keyword-face) "")))
             (ins (format "  Box:            %d  (ideal ~%d day%s)\n"
                          box interval (if (= interval 1) "" "s")))
             (ins (format "  Last reviewed:  %s\n" (resurface--format-ts lr)))
@@ -1431,14 +1453,34 @@ how many files are still due so the remaining backlog stays visible."
               (when (and prompt (not (string-empty-p prompt)))
                 (ins "  Prompt / Question:\n" 'shadow)
                 (ins (format "  %s\n\n\n" prompt) '(:weight bold :height 1.1))))
-            (ins "  Take a moment to notice what you remember before rereading.\n" '(:slant italic))
-            (ins "  When ready, press SPC to open your notes.\n" '(:slant italic))
+            (if feynman
+                (progn
+                  (ins "  This group requires a Feynman attempt first: jot the file's\n" '(:slant italic))
+                  (ins "  main points from memory before you see it.\n" '(:slant italic))
+                  (ins "  When ready, press SPC to write your attempt.\n" '(:slant italic)))
+              (ins "  Take a moment to notice what you remember before rereading.\n" '(:slant italic))
+              (ins "  When ready, press SPC to open your notes.\n" '(:slant italic)))
             (ins "\n")
             (ins "\n")
             (ins rule 'shadow)
-            (ins "  [SPC] Reveal     [s] Skip     [q] Quit\n" 'shadow)))
+            (ins (if feynman
+                     "  [SPC] Write attempt     [s] Skip     [q] Quit\n"
+                   "  [SPC] Reveal     [s] Skip     [q] Quit\n")
+                 'shadow)))
         (goto-char (point-min))))
     (switch-to-buffer buf)))
+
+(defun resurface--leitner-front-open-note (item gname &optional front-buf)
+  "Open the note file for ITEM/GNAME and enter review-minor-mode.
+Kills FRONT-BUF (Feynman buffer) if given and still live."
+  (let ((path (cdr (assq :path item))))
+    (find-file path)
+    (setq-local resurface--leitner-review-item  item)
+    (setq-local resurface--leitner-review-group gname)
+    (resurface-leitner-review-minor-mode 1)
+    (when (and front-buf (buffer-live-p front-buf))
+      (kill-buffer front-buf))
+    (run-hooks 'resurface-leitner-before-review-hook)))
 
 (defun resurface-leitner-front-reveal ()
   "Reveal the note file for the current front card."
@@ -1447,18 +1489,13 @@ how many files are still due so the remaining backlog stays visible."
     (user-error "Leitner: no front card active"))
   (let* ((item  resurface--leitner-front-item)
          (gname resurface--leitner-front-group)
-         (path  (cdr (assq :path item)))
          (fc    (current-buffer)))
-    (find-file path)
-    (setq-local resurface--leitner-review-item  item)
-    (setq-local resurface--leitner-review-group gname)
-    (resurface-leitner-review-minor-mode 1)
-    (kill-buffer fc)
-    (run-hooks 'resurface-leitner-before-review-hook)))
+    (if (resurface--leitner-group-feynman-p gname)
+        (resurface--leitner-feynman-begin item gname fc)
+      (resurface--leitner-front-open-note item gname fc))))
 
-(defun resurface-leitner-front-skip ()
-  "Skip the current front card without revealing."
-  (interactive)
+(defun resurface--leitner-session-skip-current ()
+  "Record `skip' for the item at the head of the session queue and advance."
   (unless resurface--leitner-session (user-error "Leitner: no active session"))
   (let* ((queue (cdr (assq :queue resurface--leitner-session)))
          (pair  (car queue))
@@ -1472,10 +1509,16 @@ how many files are still due so the remaining backlog stays visible."
     (message "Leitner: skipped '%s'." (file-name-nondirectory path))
     (resurface--leitner-session-advance)))
 
+(defun resurface-leitner-front-skip ()
+  "Skip the current front card without revealing."
+  (interactive)
+  (resurface--leitner-session-skip-current))
+
 (defun resurface-leitner-front-quit ()
   "Quit the session from the front card."
   (interactive)
   (when (yes-or-no-p "Quit this Leitner session (Progress so far is saved.)?")
+    (resurface--leitner-feynman-cleanup)
     (setq resurface--leitner-session nil)
     (resurface-save)
     (kill-buffer (current-buffer))
@@ -1485,7 +1528,9 @@ how many files are still due so the remaining backlog stays visible."
 (defun resurface-leitner-front-help ()
   "Show front-card keybindings in the echo area."
   (interactive)
-  (message "Leitner front: [SPC] Reveal   [s] Skip   [q] Quit"))
+  (if (resurface--leitner-group-feynman-p resurface--leitner-front-group)
+      (message "Leitner front: [SPC] Write Feynman attempt   [s] Skip   [q] Quit")
+    (message "Leitner front: [SPC] Reveal   [s] Skip   [q] Quit")))
 
 
 ;; ===========================================================================
@@ -1501,6 +1546,7 @@ how many files are still due so the remaining backlog stays visible."
     (define-key map (kbd "C-c l p") #'resurface-leitner-rate-partial)
     (define-key map (kbd "C-c l r") #'resurface-leitner-rate-revised)
     (define-key map (kbd "C-c l s") #'resurface-leitner-rate-skip)
+    (define-key map (kbd "C-c l e") #'resurface-leitner-feynman-attempt)
     (define-key map (kbd "C-c l q") #'resurface-leitner-quit-session)
     (define-key map (kbd "C-c l ?") #'resurface-leitner-review-help)
     map)
@@ -1531,13 +1577,14 @@ familiarity with it when done."
        (propertize (format " LEITNER  %d/%d " (1+ reviewed) total) 'face '(:weight bold))
        (propertize (format "  %s" resurface--leitner-review-group) 'face 'mode-line)
        (propertize (format "  Box %d  Conf %s  [%s] " box conf progress) 'face '(:slant italic))
-       (propertize "    C-c l f Familiar   C-c l u Unfamiliar   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit"
+       (propertize "    C-c l f Familiar   C-c l u Unfamiliar   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l e Feynman   C-c l q Quit"
                    'face '(:inherit shadow))))))
 
 (defun resurface--leitner-on-review-buffer-kill ()
   "Warn when a review buffer is killed mid-session."
   (when (and resurface-leitner-review-minor-mode resurface--leitner-session)
-    (message "Leitner: review buffer killed -- use M-x resurface-leitner-start-session to resume.")))
+    (resurface--leitner-feynman-cleanup)
+    (message "Leitner: review buffer killed, use M-x resurface-leitner-start-session to resume.")))
 
 ;;;###autoload
 (defun resurface-leitner-rate-familiar ()
@@ -1581,6 +1628,7 @@ returns on its normal box interval, new content and all."
   "End the current review session early and save progress."
   (interactive)
   (when (yes-or-no-p "Quit this Leitner session  (Progress so far is saved.)?")
+    (resurface--leitner-feynman-cleanup)
     (when resurface-leitner-review-minor-mode
       (resurface-leitner-review-minor-mode -1))
     (setq resurface--leitner-session nil)
@@ -1591,8 +1639,219 @@ returns on its normal box interval, new content and all."
 (defun resurface-leitner-review-help ()
   "Echo review keybindings in minibuffer."
   (interactive)
-  (message "Leitner: C-c l f Familiar   C-c l u Unfamiliar   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l q Quit   C-c l ? Help"))
+  (message "Leitner: C-c l f Familiar   C-c l u Unfamiliar   C-c l p Partial   C-c l r Revised   C-c l s Skip   C-c l e Feynman   C-c l q Quit   C-c l ? Help"))
 
+
+;; ===========================================================================
+;;  Feynman Attempt
+;;
+;;      SPC on the front card opens the scratch pad BEFORE the note is
+;;      revealed at all, so there is nothing to peek at.  Finishing the
+;;      attempt is what reveals the note, side by side with the buffer
+;;      you just wrote in.
+;;
+;;  Either way, one attempt lives at a time and it is cleared whenever
+;;  the session advances to a new item, so nothing bleeds between cards
+
+(defcustom resurface-leitner-feynman-heading "Feynman Attempts"
+  "Org heading under which saved Feynman attempts are appended.
+Created at the end of the note file, if it doesn't already have one,
+the first time an attempt is saved."
+  :type 'string
+  :group 'resurface)
+
+(defconst resurface--leitner-feynman-buf "*Resurface: Feynman Attempt*"
+  "Name of the scratch buffer for a Feynman-style recall attempt.")
+
+(defvar-local resurface--leitner-feynman-source-buffer nil
+  "The note buffer this Feynman scratch buffer belongs to.")
+(defvar-local resurface--leitner-feynman-source-path nil
+  "Path of the note file this Feynman scratch buffer belongs to.")
+(defvar-local resurface--leitner-feynman-item nil
+  "Item this attempt is for, needed to reveal it once pending.")
+(defvar-local resurface--leitner-feynman-group nil
+  "Group name of the item this attempt is for.")
+(defvar-local resurface--leitner-feynman-pending-reveal nil
+  "Non-nil while this is a forced, pre-reveal attempt with no note open yet.
+Once revealed (by saving or discarding) this is set back to nil.")
+
+(defvar resurface-leitner-feynman-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'resurface-leitner-feynman-save)
+    (define-key map (kbd "C-c C-k") #'resurface-leitner-feynman-discard)
+    (define-key map (kbd "C-c C-s") #'resurface-leitner-feynman-skip)
+    (define-key map (kbd "C-c C-q") #'resurface-leitner-feynman-quit)
+    map)
+  "Keymap for `resurface-leitner-feynman-mode'.")
+
+(define-minor-mode resurface-leitner-feynman-mode
+  "Minor mode for the scratch buffer used for a Feynman-style recall attempt.
+Write what you remember of the note's main points, in your own words,
+without checking the source."
+  :lighter " Feynman"
+  :keymap resurface-leitner-feynman-mode-map)
+
+(defun resurface--leitner-feynman-clean-text (raw)
+  "Strip the leading instructional comment lines from RAW attempt text."
+  (string-trim
+   (mapconcat #'identity
+              (seq-remove (lambda (line) (string-prefix-p "# " line))
+                          (split-string raw "\n"))
+              "\n")))
+
+(defun resurface--leitner-feynman-cleanup ()
+  "Kill any live Feynman scratch buffer, discarding an unsaved attempt.
+Called whenever the review session moves on, so a half-written attempt
+never carries over to the next card."
+  (let ((buf (get-buffer resurface--leitner-feynman-buf)))
+    (when (buffer-live-p buf)
+      (let ((win (get-buffer-window buf))
+            (kill-buffer-query-functions nil))
+        (kill-buffer buf)
+        (when (window-live-p win) (delete-window win))))))
+
+(defun resurface--leitner-feynman-append-to-note (note-buffer text)
+  "Append TEXT to NOTE-BUFFER under `resurface-leitner-feynman-heading'."
+  (with-current-buffer note-buffer
+    (save-excursion
+      (goto-char (point-max))
+      (unless (save-excursion
+                (goto-char (point-min))
+                (re-search-forward
+                 (format "^\\*+[ \t]+%s[ \t]*$"
+                         (regexp-quote resurface-leitner-feynman-heading))
+                 nil t))
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (insert (format "\n* %s\n" resurface-leitner-feynman-heading)))
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert (format "** [%s]\n%s\n"
+                      (format-time-string "%Y-%m-%d %a %H:%M")
+                      text)))
+    (save-buffer)))
+
+(defun resurface--leitner-feynman-begin (item gname front-buf)
+  "Open the forced, pre-reveal Feynman pad for ITEM/GNAME.
+FRONT-BUF (the front card) is killed once the pad is up."
+  (let* ((path (cdr (assq :path item)))
+         (buf  (get-buffer-create resurface--leitner-feynman-buf)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t)) (erase-buffer))
+      (org-mode)
+      (resurface-leitner-feynman-mode 1)
+      (setq resurface--leitner-feynman-item            item
+            resurface--leitner-feynman-group           gname
+            resurface--leitner-feynman-source-path     path
+            resurface--leitner-feynman-source-buffer   nil
+            resurface--leitner-feynman-pending-reveal  t)
+      (insert (format "# Feynman attempt (required): %s\n" (file-name-nondirectory path)))
+      (insert "# From memory, in your own words, the note isn't open yet.\n")
+      (insert "# C-c C-c saves this and reveals the note, side by side.\n")
+      (insert "# C-c C-k reveals without saving.  C-c C-s skips this card.  C-c C-q quits.\n\n"))
+    (when (buffer-live-p front-buf) (kill-buffer front-buf))
+    (delete-other-windows)
+    (switch-to-buffer buf)))
+
+;;;###autoload
+(defun resurface-leitner-feynman-attempt ()
+  "Open a scratch buffer for an Feynman-style recall attempt."
+  (interactive)
+  (unless resurface-leitner-review-minor-mode
+    (user-error "Leitner: not currently reviewing a file"))
+  (let* ((source-buf (current-buffer))
+         (path       (buffer-file-name source-buf))
+         (buf        (get-buffer-create resurface--leitner-feynman-buf))
+         (fresh      (= (buffer-size buf) 0)))
+    (with-current-buffer buf
+      (when fresh (org-mode))
+      (resurface-leitner-feynman-mode 1)
+      (setq resurface--leitner-feynman-source-buffer  source-buf
+            resurface--leitner-feynman-source-path    path
+            resurface--leitner-feynman-item            nil
+            resurface--leitner-feynman-group           nil
+            resurface--leitner-feynman-pending-reveal  nil)
+      (when fresh
+        (insert (format "# Feynman attempt: %s\n" (file-name-nondirectory path)))
+        (insert "# From memory, in your own words, don't peek at the note.\n")
+        (insert "# C-c C-c saves to the note and closes.  C-c C-k discards.\n\n")))
+    (display-buffer
+     buf
+     '((display-buffer-in-side-window)
+       (side . right)
+       (window-width . 0.45)))
+    (select-window (get-buffer-window buf))))
+
+(defun resurface-leitner-feynman-discard ()
+  "Discard the current Feynman attempt without saving."
+  (interactive)
+  (let ((pending (bound-and-true-p resurface--leitner-feynman-pending-reveal)))
+    (when (yes-or-no-p (if pending
+                           "Reveal without saving this attempt? "
+                         "Discard this Feynman attempt? "))
+      (if pending
+          (resurface--leitner-feynman-reveal-and-keep)
+        (resurface--leitner-feynman-cleanup)))))
+
+(defun resurface--leitner-feynman-reveal-and-keep ()
+  "Reveal the pending attempt's note, keeping this buffer for comparison."
+  (let ((feynman-buf (current-buffer))
+        (item        resurface--leitner-feynman-item)
+        (gname       resurface--leitner-feynman-group))
+    (delete-other-windows)
+    (resurface--leitner-front-open-note item gname)
+    (let ((note-buf (current-buffer)))
+      (display-buffer feynman-buf
+                       '((display-buffer-in-side-window)
+                         (side . right)
+                         (window-width . 0.45)))
+      (with-current-buffer feynman-buf
+        (setq resurface--leitner-feynman-source-buffer  note-buf
+              resurface--leitner-feynman-pending-reveal nil)))))
+
+(defun resurface-leitner-feynman-save ()
+  "Append the current Feynman attempt to the end of its source note.
+Inserted as a dated subheading under `resurface-leitner-feynman-heading',
+which is created at the end of the file the first time an attempt is saved."
+  (interactive)
+  (let ((pending (bound-and-true-p resurface--leitner-feynman-pending-reveal))
+        (text    (resurface--leitner-feynman-clean-text (buffer-string))))
+    (if pending
+        (progn
+          (unless (string-empty-p text)
+            (resurface--leitner-feynman-append-to-note
+             (find-file-noselect resurface--leitner-feynman-source-path) text))
+          (resurface--leitner-feynman-reveal-and-keep)
+          (message "Feynman: %s"
+                   (if (string-empty-p text) "revealed (nothing written)." "saved and revealed.")))
+      (unless (buffer-live-p resurface--leitner-feynman-source-buffer)
+        (user-error "Feynman: the original note buffer isn't open anymore"))
+      (when (string-empty-p text)
+        (user-error "Feynman: nothing written yet"))
+      (resurface--leitner-feynman-append-to-note resurface--leitner-feynman-source-buffer text)
+      (message "Feynman: attempt saved to %s"
+               (file-name-nondirectory resurface--leitner-feynman-source-path))
+      (resurface--leitner-feynman-cleanup))))
+
+(defun resurface-leitner-feynman-skip ()
+  "Skip this card entirely, before its note has ever been revealed."
+  (interactive)
+  (unless (bound-and-true-p resurface--leitner-feynman-pending-reveal)
+    (user-error "Feynman: nothing to skip here, use C-c l s in the note buffer"))
+  (resurface--leitner-feynman-cleanup)
+  (resurface--leitner-session-skip-current))
+
+(defun resurface-leitner-feynman-quit ()
+  "Quit the session, before this card's note has ever been revealed."
+  (interactive)
+  (unless (bound-and-true-p resurface--leitner-feynman-pending-reveal)
+    (user-error "Feynman: nothing to quit here, use C-c l q in the note buffer"))
+  (when (yes-or-no-p "Quit this Leitner session (Progress so far is saved.)?")
+    (resurface--leitner-feynman-cleanup)
+    (setq resurface--leitner-session nil)
+    (resurface-save)
+    (resurface-leitner)
+    (message "Leitner: session ended.  Index saved.")))
 
 ;; ===========================================================================
 ;;  Dashboard, main entry point showing each group
@@ -1601,6 +1860,7 @@ returns on its normal box interval, new content and all."
   "Column format vector, box columns sized to `resurface-leitner-intervals'."
   (vconcat
    (list (list "Group"  22 t)
+         (list "FM"      3 t)
          (list "Files"   7 t)
          (list "Due"     5 t)
          (list "Pause"   6 t)
@@ -1625,6 +1885,7 @@ returns on its normal box interval, new content and all."
         ("a"   resurface-leitner-add-file           "a add-file")
         ("A"   resurface-leitner-add-group          "A new-group")
         ("R"   resurface-leitner-menu-rename-group  "R rename")
+        ("F"   resurface-leitner-menu-toggle-feynman "F feynman")
         ("d"   resurface-leitner-menu-delete-group  "d delete")
         ("S"   resurface-save                       "S save")
         ("g"   revert-buffer                        "g refresh")
@@ -1643,6 +1904,7 @@ returns on its normal box interval, new content and all."
               (paused (length (seq-filter #'resurface--leitner-item-paused-p active)))
               (next   (resurface--leitner-group-next-due-str active))
               (grad   (- n (length active)))
+              (fm     (resurface--leitner-group-feynman-p gname))
               (boxes  (make-vector nb 0)))
          (dolist (item active)
            (let ((b (1- (min nb (cdr (assq :box item))))))
@@ -1650,6 +1912,7 @@ returns on its normal box interval, new content and all."
          (list gname
                (vconcat
                 (list gname
+                      (if fm (propertize "F" 'face 'font-lock-keyword-face) "")
                       (number-to-string n)
                       (if (> due 0) (propertize (number-to-string due) 'face 'warning) "0")
                       (if (> paused 0)
@@ -1689,6 +1952,19 @@ returns on its normal box interval, new content and all."
       (remhash gname (resurface--leitner-groups-ht))
       (resurface--persist)
       (tabulated-list-print t))))
+
+(defun resurface-leitner-menu-toggle-feynman ()
+  "Toggle Feynman mode for the group on this dashboard line."
+  (interactive)
+  (let ((gname (tabulated-list-get-id)))
+    (unless gname (user-error "Leitner: no group on current line"))
+    (resurface--leitner-set-group-feynman
+     gname (not (resurface--leitner-group-feynman-p gname)))
+    (resurface--persist)
+    (tabulated-list-print t)
+    (message "Leitner: Feynman mode %s for '%s'."
+             (if (resurface--leitner-group-feynman-p gname) "enabled" "disabled")
+             gname)))
 
 (defun resurface-leitner-menu-rename-group ()
   "Rename the group on this dashboard line."
